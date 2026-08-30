@@ -36,7 +36,11 @@ log = logging.getLogger("dasha-korean-bot")
 BASE_DIR = Path(__file__).parent
 BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "여기에_봇토큰_입력")
 CURRICULUM_PATH = BASE_DIR / "curriculum.json"
-SUBSCRIBERS_PATH = BASE_DIR / "subscribers.json"
+# subscribers.json 은 배포 때 사라지지 않도록 볼륨(DATA_DIR)에 저장한다.
+# DATA_DIR 환경변수가 없으면 기존처럼 코드 폴더를 쓴다.
+DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+SUBSCRIBERS_PATH = DATA_DIR / "subscribers.json"
 KST = pytz.timezone("Asia/Seoul")
 
 # 무료 체험 범위: DAY 1 ~ FREE_DAYS 까지는 요금제와 무관하게 발송,
