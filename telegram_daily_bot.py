@@ -39,6 +39,10 @@ CURRICULUM_PATH = BASE_DIR / "curriculum.json"
 SUBSCRIBERS_PATH = BASE_DIR / "subscribers.json"
 KST = pytz.timezone("Asia/Seoul")
 
+# 무료 체험 범위: DAY 1 ~ FREE_DAYS 까지는 요금제와 무관하게 발송,
+# 그 이후 DAY 부터는 plan == "premium" 인 구독자에게만 발송한다.
+FREE_DAYS = 3
+
 # ---------- 저장소 (subscribers.json: {"chat_id": {"day": 3, "plan": "premium"}}) ----------
 
 def load_json(path, default):
@@ -62,6 +66,20 @@ def get_curriculum():
     return load_json(CURRICULUM_PATH, {})
 
 
+def is_locked(info, day):
+    """DAY 가 무료 범위를 넘고 프리미엄이 아니면 잠금."""
+    return day > FREE_DAYS and info.get("plan") != "premium"
+
+
+def paywall_message():
+    return (
+        f"🔒 무료 체험은 DAY {FREE_DAYS}까지입니다.\n"
+        f"DAY {FREE_DAYS + 1}부터는 프리미엄 이용권이 필요해요.\n\n"
+        f"🔒 Бесплатный доступ — до DAY {FREE_DAYS}.\n"
+        f"С DAY {FREE_DAYS + 1} нужна премиум-подписка."
+    )
+
+
 # ---------- 텔레그램 명령어 ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -80,10 +98,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     subs = get_subscribers()
-    day = subs.get(chat_id, {}).get("day", 0) + 1
+    subs.setdefault(chat_id, {"day": 0, "plan": "free"})
+    day = subs[chat_id].get("day", 0) + 1
+    if is_locked(subs[chat_id], day):
+        save_subscribers(subs)
+        await update.message.reply_text(paywall_message())
+        return
     text = build_lesson_message(day)
     await update.message.reply_text(text, parse_mode="HTML")
-    subs.setdefault(chat_id, {"day": 0, "plan": "free"})
     subs[chat_id]["day"] = day
     save_subscribers(subs)
 
@@ -125,9 +147,9 @@ async def send_daily_lessons(app):
     now = datetime.now(KST)
     log.info("11시 자동 발송 시작: %s, 구독자 %d명", now, len(subs))
     for chat_id, info in subs.items():
-        if info.get("plan") != "premium":
-            continue  # 무료 사용자는 텔레그램 자동발송 제외 (요금제 정책에 맞게 조정)
         next_day = info.get("day", 0) + 1
+        if is_locked(info, next_day):
+            continue  # DAY 4 이상은 프리미엄 전용 (무료 사용자는 자동발송 제외)
         text = build_lesson_message(next_day)
         try:
             await app.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
