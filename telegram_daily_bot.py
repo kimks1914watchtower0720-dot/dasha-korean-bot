@@ -103,14 +103,18 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     subs = get_subscribers()
     subs.setdefault(chat_id, {"day": 0, "plan": "free"})
-    day = subs[chat_id].get("day", 0) + 1
+    # /today 는 진도를 올리지 않고 "오늘의 DAY"를 다시 보여준다.
+    # DAY 진행은 매일 11시 자동발송이만 담당한다.
+    day = subs[chat_id].get("day", 0)
+    if day < 1:
+        day = 1
+        subs[chat_id]["day"] = 1  # 가입 직후에는 DAY 1을 바로 보여준다
     if is_locked(subs[chat_id], day):
         save_subscribers(subs)
         await update.message.reply_text(paywall_message())
         return
     text = build_lesson_message(day)
     await update.message.reply_text(text, parse_mode="HTML")
-    subs[chat_id]["day"] = day
     save_subscribers(subs)
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
