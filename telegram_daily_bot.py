@@ -206,6 +206,9 @@ def build_lesson_message(day: int) -> str:
     if not lesson:
         return f"DAY {day} 콘텐츠가 아직 준비되지 않았습니다. 조금만 기다려주세요! 🙏"
     lines = [f"📅 <b>DAY {day} · {lesson.get('title_kr','')}</b>", f"<i>{lesson.get('title_ru','')}</i>", ""]
+    if lesson.get("homework"):
+        lines.append(f"🎧 <b>Аудио + тест:</b> {lesson['homework']}")
+        lines.append("")
     if lesson.get("grammar"):
         lines.append("📖 <b>Грамматика</b>")
         for g in lesson["grammar"]:
@@ -223,9 +226,6 @@ def build_lesson_message(day: int) -> str:
     if lesson.get("video"):
         lines.append("")
         lines.append(f"🎬 영상 강의 / Видеоурок: {lesson['video']}")
-    if lesson.get("homework"):
-        lines.append("")
-        lines.append(f"📝 숙제 / Домашнее задание: {lesson['homework']}")
     return "\n".join(lines)
 
 
