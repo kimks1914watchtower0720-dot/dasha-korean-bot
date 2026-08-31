@@ -27,8 +27,8 @@ from pathlib import Path
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("dasha-korean-bot")
@@ -45,7 +45,7 @@ KST = pytz.timezone("Asia/Seoul")
 
 # 무료 체험 범위: DAY 1 ~ FREE_DAYS 까지는 요금제와 무관하게 발송,
 # 그 이후 DAY 부터는 plan == "premium" 인 구독자에게만 발송한다.
-FREE_DAYS = 3
+FREE_DAYS = 7
 
 # 프리미엄 전환 요청 알림을 받을 관리자 chat_id (Railway 환경변수로 덮어쓸 수 있음)
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "6062717977")
@@ -117,15 +117,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subs = get_subscribers()
     subs.setdefault(chat_id, {"day": 0, "plan": "free"})
     save_subscribers(subs)
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🌱 첫날 시작하기 / Начать DAY 1", callback_data="start_day1")]]
+    )
     await update.message.reply_text(
-        "안녕하세요! 다샤의 한국어 30일 봇입니다.\n"
-        f"무료 체험이 시작되었어요! 오늘부터 {FREE_DAYS}일 동안 무료로 한국어를 배울 수 있습니다.\n"
-        "매일 오전 11시(KST)에 그날의 문법·단어·예문을 자동으로 보내드려요.\n\n"
-        "Здравствуйте! Это бот «Корейский за 30 дней с Дашей».\n"
-        f"Бесплатный пробный период начался — {FREE_DAYS} дня бесплатно.\n"
-        "Каждый день в 11:00 (по Сеулу) урок придёт автоматически.\n\n"
-        f"DAY {FREE_DAYS + 1}부터도 계속 배우고 싶으시면 /premium 을 눌러주세요.\n"
-        f"Чтобы продолжить с DAY {FREE_DAYS + 1}, нажмите /premium."
+        "🎉 무료 체험 일주일, 오신 것을 환영합니다!\n"
+        "다샤의 한국어 30일 봇입니다.\n"
+        "매일 오전 11시(KST)에 그날의 문법·단어·예문과 숙제를 보내드려요.\n\n"
+        "🎉 Добро пожаловать! Неделя бесплатного доступа.\n"
+        "Это бот «Корейский за 30 дней с Дашей».\n"
+        "Каждый день в 11:00 (по Сеулу) вы получите урок и домашнее задание.\n\n"
+        "아래 버튼을 누르면 DAY 1이 바로 시작됩니다.\n"
+        "Нажмите кнопку ниже, чтобы начать DAY 1.",
+        reply_markup=keyboard,
     )
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -181,6 +185,19 @@ async def premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         log.warning("관리자 알림 실패: %s", e)
+
+
+async def start_day1(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """첫날 시작하기 버튼 — DAY 1 레슨을 바로 보낸다."""
+    query = update.callback_query
+    await query.answer()
+    chat_id = str(query.message.chat.id)
+    subs = get_subscribers()
+    info = subs.setdefault(chat_id, {"day": 0, "plan": "free"})
+    if info.get("day", 0) < 1:
+        info["day"] = 1
+    save_subscribers(subs)
+    await query.message.reply_text(build_lesson_message(1), parse_mode="HTML")
 
 
 def build_lesson_message(day: int) -> str:
@@ -246,6 +263,7 @@ def main():
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("premium", premium))
+    app.add_handler(CallbackQueryHandler(start_day1, pattern="^start_day1$"))
 
     log.info("봇 시작됨.")
     app.run_polling()
