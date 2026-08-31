@@ -47,6 +47,9 @@ KST = pytz.timezone("Asia/Seoul")
 # 그 이후 DAY 부터는 plan == "premium" 인 구독자에게만 발송한다.
 FREE_DAYS = 3
 
+# 프리미엄 전환 요청 알림을 받을 관리자 chat_id (Railway 환경변수로 덮어쓸 수 있음)
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "6062717977")
+
 # ---------- 저장소 (subscribers.json: {"chat_id": {"day": 3, "plan": "premium"}}) ----------
 
 def load_json(path, default):
@@ -80,7 +83,9 @@ def paywall_message():
         f"🔒 무료 체험은 DAY {FREE_DAYS}까지입니다.\n"
         f"DAY {FREE_DAYS + 1}부터는 프리미엄 이용권이 필요해요.\n\n"
         f"🔒 Бесплатный доступ — до DAY {FREE_DAYS}.\n"
-        f"С DAY {FREE_DAYS + 1} нужна премиум-подписка."
+        f"С DAY {FREE_DAYS + 1} нужна премиум-подписка.\n\n"
+        "프리미엄 전환을 원하시면 /premium 을 눌러주세요.\n"
+        "Чтобы оформить премиум, нажмите /premium."
     )
 
 
@@ -93,10 +98,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_subscribers(subs)
     await update.message.reply_text(
         "안녕하세요! 다샤의 한국어 30일 봇입니다.\n"
-        "매일 오전 11시(KST)에 그날의 문법·단어·예문을 보내드려요.\n\n"
+        f"무료 체험이 시작되었어요! 오늘부터 {FREE_DAYS}일 동안 무료로 한국어를 배울 수 있습니다.\n"
+        "매일 오전 11시(KST)에 그날의 문법·단어·예문을 자동으로 보내드려요.\n\n"
         "Здравствуйте! Это бот «Корейский за 30 дней с Дашей».\n"
-        "Каждый день в 11:00 (по Сеулу) вы будете получать урок.\n\n"
-        "지금 바로 오늘의 학습을 받고 싶다면 /today 를 입력하세요."
+        f"Бесплатный пробный период начался — {FREE_DAYS} дня бесплатно.\n"
+        "Каждый день в 11:00 (по Сеулу) урок придёт автоматически.\n\n"
+        f"DAY {FREE_DAYS + 1}부터도 계속 배우고 싶으시면 /premium 을 눌러주세요.\n"
+        f"Чтобы продолжить с DAY {FREE_DAYS + 1}, нажмите /premium."
     )
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -123,6 +131,38 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subs.pop(chat_id, None)
     save_subscribers(subs)
     await update.message.reply_text("알림을 중단했습니다. 다시 시작하려면 /start 를 입력하세요.")
+
+
+async def premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """사용자가 /premium 을 누르면 관리자에게 전환 요청 알림을 보낸다."""
+    chat_id = str(update.effective_chat.id)
+    user = update.effective_user
+    subs = get_subscribers()
+    info = subs.setdefault(chat_id, {"day": 0, "plan": "free"})
+    save_subscribers(subs)
+
+    await update.message.reply_text(
+        "프리미엄 전환 요청이 접수되었습니다. 확인 후 안내드릴게요!\n"
+        "Заявка на премиум принята. Мы свяжемся с вами."
+    )
+
+    if not ADMIN_CHAT_ID:
+        return
+    name = " ".join(x for x in [getattr(user, "first_name", None), getattr(user, "last_name", None)] if x)
+    username = f"@{user.username}" if getattr(user, "username", None) else "(없음)"
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=(
+                "🔔 프리미엄 전환 요청이 들어왔습니다.\n"
+                f"이름: {name or '(없음)'}\n"
+                f"아이디: {username}\n"
+                f"chat_id: {chat_id}\n"
+                f"현재 DAY: {info.get('day', 0)} / plan: {info.get('plan', 'free')}"
+            ),
+        )
+    except Exception as e:
+        log.warning("관리자 알림 실패: %s", e)
 
 
 def build_lesson_message(day: int) -> str:
@@ -181,6 +221,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("stop", stop))
+    app.add_handler(CommandHandler("premium", premium))
 
     log.info("봇 시작됨.")
     app.run_polling()
