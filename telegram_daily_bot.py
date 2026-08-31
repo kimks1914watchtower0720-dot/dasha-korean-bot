@@ -206,6 +206,9 @@ def build_lesson_message(day: int) -> str:
     if lesson.get("video"):
         lines.append("")
         lines.append(f"🎬 영상 강의 / Видеоурок: {lesson['video']}")
+    if lesson.get("homework"):
+        lines.append("")
+        lines.append(f"📝 숙제 / Домашнее задание: {lesson['homework']}")
     return "\n".join(lines)
 
 
