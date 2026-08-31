@@ -207,17 +207,17 @@ def build_lesson_message(day: int) -> str:
         return f"DAY {day} 콘텐츠가 아직 준비되지 않았습니다. 조금만 기다려주세요! 🙏"
     lines = [f"📅 <b>DAY {day} · {lesson.get('title_kr','')}</b>", f"<i>{lesson.get('title_ru','')}</i>", ""]
     if lesson.get("grammar"):
-        lines.append("📖 <b>문법</b>")
+        lines.append("📖 <b>Грамматика</b>")
         for g in lesson["grammar"]:
             lines.append(f"• {g['p']} — {g['ru']}")
         lines.append("")
     if lesson.get("vocab"):
-        lines.append("🔤 <b>단어</b>")
+        lines.append("🔤 <b>Слова</b>")
         for v in lesson["vocab"]:
-            lines.append(f"• {v['kr']} [{v['rom']}] — {v['ru']}")
+            lines.append(f"• {v['kr']} — {v['ru']}")
         lines.append("")
     if lesson.get("sentences"):
-        lines.append("💬 <b>예문</b>")
+        lines.append("💬 <b>Примеры</b>")
         for s in lesson["sentences"]:
             lines.append(f"• {s['kr']} — {s['ru']}")
     if lesson.get("video"):
