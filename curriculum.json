@@ -96,7 +96,8 @@
         "ru": "Я — россиянка."
       }
     ],
-    "video": "https://www.youtube.com/watch?v=o5gO07m9QBM&list=PLUa1FE1E3AYsYsi5NHPs9mbsQKjd2qi5e"
+    "video": "https://www.youtube.com/watch?v=o5gO07m9QBM&list=PLUa1FE1E3AYsYsi5NHPs9mbsQKjd2qi5e",
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/day2-9cc75f288b.html"
   },
   "3": {
     "title_kr": "이것/그것/저것",
@@ -138,7 +139,8 @@
         "kr": "이것은 제 책입니다.",
         "ru": "Это моя книга."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/day3-cb80466a8a.html"
   },
   "4": {
     "title_kr": "있어요/없어요",
@@ -175,7 +177,8 @@
         "kr": "지금 시간이 없어요.",
         "ru": "Сейчас у меня нет времени."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/day4-be319ea4d3.html"
   },
   "5": {
     "title_kr": "숫자 (한자어 숫자)",
@@ -208,7 +211,8 @@
         "kr": "이거 얼마예요? 오천 원입니다.",
         "ru": "Сколько это стоит? 5000 вон."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/day5-46a7fa8746.html"
   },
   "6": {
     "title_kr": "숫자 (고유어 숫자)와 시간",
@@ -268,7 +272,8 @@
         "kr": "사과 두 개 주세요.",
         "ru": "Дайте два яблока, пожалуйста."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/day6-00047b0c23.html"
   },
   "7": {
     "title_kr": "좋아요/싫어요",
@@ -328,7 +333,8 @@
         "kr": "저는 매운 음식이 싫어요.",
         "ru": "Мне не нравится острая еда."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/day7-a8abb00779.html"
   },
   "8": {
     "title_kr": "~을/를 먹어요",
