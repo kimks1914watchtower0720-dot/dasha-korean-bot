@@ -50,6 +50,11 @@ FREE_DAYS = 3
 # 프리미엄 전환 요청 알림을 받을 관리자 chat_id (Railway 환경변수로 덮어쓸 수 있음)
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "6062717977")
 
+# 결제 안내 값 — Railway 환경변수로 언제든 바꿀 수 있다.
+PRICE_MONTH = os.environ.get("PRICE_MONTH", "500")
+PRICE_YEAR = os.environ.get("PRICE_YEAR", "5000")
+PAYMENT_ACCOUNT = os.environ.get("PAYMENT_ACCOUNT", "1234567890")
+
 # ---------- 저장소 (subscribers.json: {"chat_id": {"day": 3, "plan": "premium"}}) ----------
 
 def load_json(path, default):
@@ -76,6 +81,22 @@ def get_curriculum():
 def is_locked(info, day):
     """DAY 가 무료 범위를 넘고 프리미엄이 아니면 잠금."""
     return day > FREE_DAYS and info.get("plan") != "premium"
+
+
+def payment_message():
+    """/premium 을 누른 사람에게 보낼 결제 안내."""
+    return (
+        "💳 프리미엄 구독 안내\n"
+        f"・1개월 구독: {PRICE_MONTH} 루블\n"
+        f"・1년 구독: {PRICE_YEAR} 루블\n\n"
+        f"입금 계좌: {PAYMENT_ACCOUNT}\n"
+        "입금이 확인되면 프리미엄이 활성화됩니다.\n\n"
+        "💳 Премиум-подписка\n"
+        f"• 1 месяц — {PRICE_MONTH} руб.\n"
+        f"• 1 год — {PRICE_YEAR} руб.\n\n"
+        f"Счёт для оплаты: {PAYMENT_ACCOUNT}\n"
+        "После подтверждения оплаты премиум будет активирован."
+    )
 
 
 def paywall_message():
@@ -141,10 +162,7 @@ async def premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     info = subs.setdefault(chat_id, {"day": 0, "plan": "free"})
     save_subscribers(subs)
 
-    await update.message.reply_text(
-        "프리미엄 전환 요청이 접수되었습니다. 확인 후 안내드릴게요!\n"
-        "Заявка на премиум принята. Мы свяжемся с вами."
-    )
+    await update.message.reply_text(payment_message())
 
     if not ADMIN_CHAT_ID:
         return
