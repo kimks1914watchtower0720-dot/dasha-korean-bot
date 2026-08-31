@@ -203,6 +203,9 @@ def build_lesson_message(day: int) -> str:
         lines.append("💬 <b>예문</b>")
         for s in lesson["sentences"]:
             lines.append(f"• {s['kr']} — {s['ru']}")
+    if lesson.get("video"):
+        lines.append("")
+        lines.append(f"🎬 영상 강의 / Видеоурок: {lesson['video']}")
     return "\n".join(lines)
 
 
