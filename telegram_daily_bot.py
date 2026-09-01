@@ -234,8 +234,11 @@ def build_lesson_message(day: int) -> str:
 async def send_daily_lessons(app):
     subs = get_subscribers()
     now = datetime.now(KST)
-    log.info("11시 자동 발송 시작: %s, 구독자 %d명", now, len(subs))
+    today = now.strftime("%Y-%m-%d")
+    log.info("자동 발송 시작: %s, 구독자 %d명", now, len(subs))
     for chat_id, info in subs.items():
+        if info.get("last_sent") == today:
+            continue  # 오늘 이미 보냈으면 건너뛴
         next_day = info.get("day", 0) + 1
         if is_locked(info, next_day):
             continue  # DAY 4 이상은 프리미엄 전용 (무료 사용자는 자동발송 제외)
@@ -243,6 +246,7 @@ async def send_daily_lessons(app):
         try:
             await app.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
             info["day"] = next_day
+            info["last_sent"] = today
         except Exception as e:
             log.warning("발송 실패 chat_id=%s: %s", chat_id, e)
     save_subscribers(subs)
@@ -252,9 +256,13 @@ async def _start_scheduler(app):
     # run_polling()이 자체 이벤트 루프를 만든 "이후"에 스케줄러를 시작해야 하므로
     # post_init 콜백 안에서 시작한다 (RuntimeError: no running event loop 방지).
     scheduler = AsyncIOScheduler(timezone=KST)
-    scheduler.add_job(lambda: app.create_task(send_daily_lessons(app)), "cron", hour=11, minute=0)
+    scheduler.add_job(lambda: app.create_task(send_daily_lessons(app)), "cron", hour=11, minute=0, misfire_grace_time=3600)
     scheduler.start()
     log.info("스케줄러 시작됨. 매일 11:00(KST)에 자동 발송됩니다.")
+    # 재배포 등으로 11시를 놓쳤으면 시작 직후 보충 발송 (하루 1회만)
+    if datetime.now(KST).hour >= 11:
+        log.info("11시 이후 기동 — 오늘치 보충 발송을 시도합니다.")
+        app.create_task(send_daily_lessons(app))
 
 
 def main():
