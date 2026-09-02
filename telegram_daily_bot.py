@@ -22,7 +22,8 @@ Telegram bot: sends today's Korean lesson (grammar / vocab / sentences) at 11:00
 import json
 import os
 import logging
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytz
@@ -252,17 +253,32 @@ async def send_daily_lessons(app):
     save_subscribers(subs)
 
 
+async def _daily_loop(app):
+    """매일 11:00(KST)까지 기다렸다가 발송하는 단순 루프.
+
+    APScheduler 대신 직접 재우고 깨우는 방식이라 스레드/이벤트 루프 문제가 없다.
+    """
+    while True:
+        now = datetime.now(KST)
+        target = now.replace(hour=11, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        wait = (target - now).total_seconds()
+        log.info("다음 자동 발송 예정: %s (%.0f초 뒤)", target, wait)
+        await asyncio.sleep(wait)
+        try:
+            await send_daily_lessons(app)
+        except Exception as e:
+            log.warning("자동 발송 중 오류: %s", e)
+
+
 async def _start_scheduler(app):
-    # run_polling()이 자체 이벤트 루프를 만든 "이후"에 스케줄러를 시작해야 하므로
-    # post_init 콜백 안에서 시작한다 (RuntimeError: no running event loop 방지).
-    scheduler = AsyncIOScheduler(timezone=KST)
-    scheduler.add_job(lambda: app.create_task(send_daily_lessons(app)), "cron", hour=11, minute=0, misfire_grace_time=3600)
-    scheduler.start()
-    log.info("스케줄러 시작됨. 매일 11:00(KST)에 자동 발송됩니다.")
-    # 재배포 등으로 11시를 놓쳤으면 시작 직후 보충 발송 (하루 1회만)
+    # run_polling()이 이벤트 루프를 만든 "이후"에 시작해야 하므로 post_init 안에서 띄운다.
     if datetime.now(KST).hour >= 11:
         log.info("11시 이후 기동 — 오늘치 보충 발송을 시도합니다.")
         app.create_task(send_daily_lessons(app))
+    app.create_task(_daily_loop(app))
+    log.info("자동 발송 루프 시작됨. 매일 11:00(KST)에 발송됩니다.")
 
 
 def main():
