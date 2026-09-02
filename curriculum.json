@@ -57,7 +57,7 @@
         "ru": "Меня зовут (      )"
       }
     ],
-    "homework": "https://boisterous-smakager-668cc1.netlify.app/"
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=1"
   },
   "2": {
     "title_kr": "저는 ~입니다 (자기소개)",
@@ -105,7 +105,7 @@
       }
     ],
     "video": "https://www.youtube.com/watch?v=o5gO07m9QBM&list=PLUa1FE1E3AYsYsi5NHPs9mbsQKjd2qi5e",
-    "homework": "https://boisterous-smakager-668cc1.netlify.app/day2-9cc75f288b.html"
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=2"
   },
   "3": {
     "title_kr": "이것/그것/저것",
@@ -148,7 +148,7 @@
         "ru": "Это моя книга."
       }
     ],
-    "homework": "https://boisterous-smakager-668cc1.netlify.app/day3-cb80466a8a.html"
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=3"
   },
   "4": {
     "title_kr": "있어요/없어요",
@@ -186,7 +186,7 @@
         "ru": "Сейчас у меня нет времени."
       }
     ],
-    "homework": "https://boisterous-smakager-668cc1.netlify.app/day4-be319ea4d3.html"
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=4"
   },
   "5": {
     "title_kr": "숫자 (한자어 숫자)",
@@ -220,7 +220,7 @@
         "ru": "Сколько это стоит? 5000 вон."
       }
     ],
-    "homework": "https://boisterous-smakager-668cc1.netlify.app/day5-46a7fa8746.html"
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=5"
   },
   "6": {
     "title_kr": "숫자 (고유어 숫자)와 시간",
@@ -281,7 +281,7 @@
         "ru": "Дайте два яблока, пожалуйста."
       }
     ],
-    "homework": "https://boisterous-smakager-668cc1.netlify.app/day6-00047b0c23.html"
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=6"
   },
   "7": {
     "title_kr": "좋아요/싫어요",
@@ -342,7 +342,7 @@
         "ru": "Мне не нравится острая еда."
       }
     ],
-    "homework": "https://boisterous-smakager-668cc1.netlify.app/day7-a8abb00779.html"
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=7"
   },
   "8": {
     "title_kr": "~을/를 먹어요",
@@ -402,7 +402,8 @@
         "kr": "아침에 빵을 먹어요.",
         "ru": "Утром я ем хлеб."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=8"
   },
   "9": {
     "title_kr": "~에 가요",
@@ -462,7 +463,8 @@
         "kr": "카페에서 커피를 마셔요.",
         "ru": "Я пью кофе в кафе."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=9"
   },
   "10": {
     "title_kr": "어제/오늘/내일",
@@ -522,7 +524,8 @@
         "kr": "내일 회사에 가요.",
         "ru": "Завтра я иду на работу."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=10"
   },
   "11": {
     "title_kr": "가족 소개",
@@ -582,7 +585,8 @@
         "kr": "저는 동생이 있어요.",
         "ru": "У меня есть младший брат/сестра."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=11"
   },
   "12": {
     "title_kr": "날씨 표현",
@@ -642,7 +646,8 @@
         "kr": "한국의 겨울은 추워요.",
         "ru": "Зима в Корее холодная."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=12"
   },
   "13": {
     "title_kr": "쇼핑: 이거 얼마예요?",
@@ -702,7 +707,8 @@
         "kr": "카드로 계산할게요.",
         "ru": "Я оплачу картой."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=13"
   },
   "14": {
     "title_kr": "음식 주문하기",
@@ -762,7 +768,8 @@
         "kr": "정말 맛있어요!",
         "ru": "Очень вкусно!"
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=14"
   },
   "15": {
     "title_kr": "길 묻기",
@@ -822,7 +829,8 @@
         "kr": "편의점 건너편에 있어요.",
         "ru": "Это напротив мини-маркета."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=15"
   },
   "16": {
     "title_kr": "하루 일과 말하기",
@@ -882,7 +890,8 @@
         "kr": "밤 열한 시에 자요.",
         "ru": "Ложусь спать в 11 вечера."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=16"
   },
   "17": {
     "title_kr": "~고 싶어요",
@@ -942,7 +951,8 @@
         "kr": "매운 음식은 먹고 싶지 않아요.",
         "ru": "Не хочу есть острое."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=17"
   },
   "18": {
     "title_kr": "~아/어 주세요",
@@ -1002,7 +1012,8 @@
         "kr": "잠깐만 기다려 주세요.",
         "ru": "Подождите минутку, пожалуйста."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=18"
   },
   "19": {
     "title_kr": "취미 이야기하기",
@@ -1062,7 +1073,8 @@
         "kr": "주말에는 운동해요.",
         "ru": "По выходным я занимаюсь спортом."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=19"
   },
   "20": {
     "title_kr": "과거형 총정리",
@@ -1122,7 +1134,8 @@
         "kr": "주말에 뭐 했어요?",
         "ru": "Что вы делали на выходных?"
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=20"
   },
   "21": {
     "title_kr": "미래 계획 (~ㄹ 거예요)",
@@ -1182,7 +1195,8 @@
         "kr": "내년에 졸업할 계획이에요.",
         "ru": "Планирую закончить учёбу в следующем году."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=21"
   },
   "22": {
     "title_kr": "비교하기 (더/제일)",
@@ -1242,7 +1256,8 @@
         "kr": "두 개가 가격이 같아요.",
         "ru": "У этих двух одинаковая цена."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=22"
   },
   "23": {
     "title_kr": "이유 말하기 (~아/어서)",
@@ -1302,7 +1317,8 @@
         "kr": "길이 막혀서 늦었어요.",
         "ru": "Была пробка, поэтому я опоздал(а)."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=23"
   },
   "24": {
     "title_kr": "전화 통화 표현",
@@ -1362,7 +1378,8 @@
         "kr": "이따가 다시 걸게요.",
         "ru": "Перезвоню чуть позже."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=24"
   },
   "25": {
     "title_kr": "여행 계획 세우기",
@@ -1422,7 +1439,8 @@
         "kr": "아직 짐을 안 쌌어요.",
         "ru": "Я ещё не собрал(а) чемодан."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=25"
   },
   "26": {
     "title_kr": "감정 표현하기",
@@ -1482,7 +1500,8 @@
         "kr": "그 소식을 듣고 놀랐어요.",
         "ru": "Я удивился/удивилась, услышав эту новость."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=26"
   },
   "27": {
     "title_kr": "존댓말 vs 반말",
@@ -1542,7 +1561,8 @@
         "kr": "편하게 말해도 돼요.",
         "ru": "Можно говорить неформально."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=27"
   },
   "28": {
     "title_kr": "자주 틀리는 표현",
@@ -1602,7 +1622,8 @@
         "kr": "실수를 고치면서 배워요.",
         "ru": "Учусь, исправляя ошибки."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=28"
   },
   "29": {
     "title_kr": "실전 회화: 카페에서",
@@ -1658,7 +1679,8 @@
         "kr": "잔돈은 됐어요, 감사합니다.",
         "ru": "Сдачи не нужно, спасибо."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=29"
   },
   "30": {
     "title_kr": "총복습 & 자기소개 다시쓰기",
@@ -1718,6 +1740,7 @@
         "kr": "앞으로도 계속 공부할 거예요.",
         "ru": "Буду продолжать учиться и дальше."
       }
-    ]
+    ],
+    "homework": "https://boisterous-smakager-668cc1.netlify.app/?day=30"
   }
 }
