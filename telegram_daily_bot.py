@@ -653,19 +653,24 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     day = int(user.get("day") or 0)
 
     if already:
-        # 이미 시작한 사람에게는 버튼을 다시 보여주지 않는다. 진도도 건드리지 않는다.
+        # 이미 시작한 사람에게는 시작 버튼을 다시 보여주지 않는다. 진도도 건드리지 않는다.
+        again_kb = InlineKeyboardMarkup([[InlineKeyboardButton("\U0001F4B3 \uc720\ub8cc \uad6c\ub3c5 \uc2e0\uccad / \u041E\u0444\u043E\u0440\u043C\u0438\u0442\u044C \u043F\u043E\u0434\u043F\u0438\u0441\u043A\u0443", callback_data="apply_premium")]])
         await update.message.reply_text(
             "\ub2e4\uc2dc \uc624\uc168\ub124\uc694! \uc774\ubbf8 \ud559\uc2b5\uc744 \uc2dc\uc791\ud558\uc168\uc2b5\ub2c8\ub2e4.\n"
             "\ud604\uc7ac \uc9c4\ub3c4: DAY " + str(max(day, 1)) + "\n\n"
             "\u0421 \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0435\u043D\u0438\u0435\u043C! \u0412\u044B \u0443\u0436\u0435 \u043D\u0430\u0447\u0430\u043B\u0438 \u043A\u0443\u0440\u0441.\n"
             "\u0422\u0435\u043A\u0443\u0449\u0438\u0439 \u0434\u0435\u043D\u044C: DAY " + str(max(day, 1)) + "\n\n"
             "\uc624\ub298 \ubd84\ub7c9\uc744 \ub2e4\uc2dc \ubcf4\ub824\uba74 /today \ub97c \uc785\ub825\ud558\uc138\uc694.\n"
-            "\u0427\u0442\u043E\u0431\u044B \u043F\u043E\u0441\u043C\u043E\u0442\u0440\u0435\u0442\u044C \u0443\u0440\u043E\u043A, \u0432\u0432\u0435\u0434\u0438\u0442\u0435 /today."
+            "\u0427\u0442\u043E\u0431\u044B \u043F\u043E\u0441\u043C\u043E\u0442\u0440\u0435\u0442\u044C \u0443\u0440\u043E\u043A, \u0432\u0432\u0435\u0434\u0438\u0442\u0435 /today.",
+            reply_markup=again_kb,
         )
         return
 
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("\U0001F331 \uccab\ub0a0 \uc2dc\uc791\ud558\uae30 / \u041D\u0430\u0447\u0430\u0442\u044C DAY 1", callback_data="start_day1")]]
+        [
+            [InlineKeyboardButton("\U0001F331 \uccab\ub0a0 \uc2dc\uc791\ud558\uae30 / \u041D\u0430\u0447\u0430\u0442\u044C DAY 1", callback_data="start_day1")],
+            [InlineKeyboardButton("\U0001F4B3 \uc720\ub8cc \uad6c\ub3c5 \uc2e0\uccad / \u041E\u0444\u043E\u0440\u043C\u0438\u0442\u044C \u043F\u043E\u0434\u043F\u0438\u0441\u043A\u0443", callback_data="apply_premium")],
+        ]
     )
     await update.message.reply_text(
         "\U0001F389 \ubb34\ub8cc \uccb4\ud5d8 \uc77c\uc8fc\uc77c, \uc624\uc2e0 \uac83\uc744 \ud658\uc601\ud569\ub2c8\ub2e4!\n"
@@ -681,9 +686,11 @@ async def cb_start_day1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = str(query.message.chat.id)
 
-    # 버튼을 먼저 없앤다 (연타 방지 + 다시 눌리지 않게)
+    # 시작 버튼만 없앤다 (연타 방지). 유료 신청 버튼은 남겨둔다.
     try:
-        await query.edit_message_reply_markup(reply_markup=None)
+        await query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\U0001F4B3 \uc720\ub8cc \uad6c\ub3c5 \uc2e0\uccad / \u041E\u0444\u043E\u0440\u043C\u0438\u0442\u044C \u043F\u043E\u0434\u043F\u0438\u0441\u043A\u0443", callback_data="apply_premium")]])
+        )
     except Exception:
         pass
 
@@ -725,27 +732,43 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.to_thread(send_lesson_to, chat_id, lesson, "manual")
 
 
-async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    u = update.effective_user
-    upsert_user(chat_id)
-    user = get_user(chat_id) or {}
-    await update.message.reply_text(payment_text())
+def notify_admin_premium(chat_id, tg_user):
+    """프리미엄 신청을 관리자에게 알린다. (기존 로직 그대로, 한 곳으로 모음)"""
     if not ADMIN_CHAT_ID:
         return
-    name = " ".join(x for x in [getattr(u, "first_name", None), getattr(u, "last_name", None)] if x)
-    uname = "@" + u.username if getattr(u, "username", None) else "(\uc5c6\uc74c)"
+    user = get_user(chat_id) or {}
+    name = " ".join(
+        x for x in [getattr(tg_user, "first_name", None), getattr(tg_user, "last_name", None)] if x
+    )
+    uname = "@" + tg_user.username if getattr(tg_user, "username", None) else "(\uc5c6\uc74c)"
     try:
         tg_text(
             ADMIN_CHAT_ID,
             "\U0001F514 \ud504\ub9ac\ubbf8\uc5c4 \uc804\ud658 \uc694\uccad\n"
             "\uc774\ub984: " + (name or "(\uc5c6\uc74c)") + "\n"
             "\uc544\uc774\ub514: " + uname + "\n"
-            "chat_id: " + chat_id + "\n"
+            "chat_id: " + str(chat_id) + "\n"
             "\ud604\uc7ac DAY: " + str(user.get("day", 0)) + " / plan: " + str(user.get("plan", "free")),
         )
     except Exception as e:
         log.warning("관리자 알림 실패: %s", e)
+
+
+async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    upsert_user(chat_id)
+    await update.message.reply_text(payment_text())
+    await asyncio.to_thread(notify_admin_premium, chat_id, update.effective_user)
+
+
+async def cb_apply_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """유료 구독 신청 버튼 — /premium 과 완전히 같은 안내와 같은 신청 처리를 쓴다."""
+    query = update.callback_query
+    await query.answer()
+    chat_id = str(query.message.chat.id)
+    upsert_user(chat_id)
+    await query.message.reply_text(payment_text())
+    await asyncio.to_thread(notify_admin_premium, chat_id, query.from_user)
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1841,6 +1864,7 @@ def main():
     app.add_handler(CommandHandler("premium", cmd_premium))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CallbackQueryHandler(cb_start_day1, pattern="^start_day1$"))
+    app.add_handler(CallbackQueryHandler(cb_apply_premium, pattern="^apply_premium$"))
     log.info("봇 시작됨.")
     app.run_polling()
 
