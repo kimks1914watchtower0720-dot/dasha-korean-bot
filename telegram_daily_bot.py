@@ -23,8 +23,11 @@ import json
 import os
 import logging
 import asyncio
+import hmac
 import html
+import secrets
 import threading
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
@@ -236,7 +239,7 @@ input[type=number],select{width:74px;padding:6px 8px;border-radius:8px;border:1p
 .toast.on{opacity:1}
 .sub{color:var(--mut);font-size:12px}
 </style></head><body><div class="wrap">
-<h1>학생 관리</h1>
+<h1>학생 관리 <a href="/logout" style="float:right;font-size:13px;font-weight:400;color:#9aa2b1;text-decoration:none">로그아웃</a></h1>
 <div class="meta" id="meta">불러오는 중...</div>
 <table><thead><tr><th>chat_id</th><th>이름</th><th>요금제</th><th>진도(DAY)</th><th>마지막 발송</th><th>발송</th></tr></thead><tbody id="tb"></tbody></table>
 <div class="toast" id="toast"></div>
@@ -295,8 +298,42 @@ setInterval(load, 30000);
 
 # ---------- 관리자 대시보드 (IP 제한) ----------
 
-ADMIN_IPS = [x.strip() for x in os.environ.get("ADMIN_IPS", "").split(",") if x.strip()]
-ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+# 비밀번호는 코드에 두지 않는다 (공개 저장소). Railway 환경변수 ADMIN_PASSWORD 를 읽는다.
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+SESSION_TTL = 12 * 60 * 60      # 로그인 유지 시간 (12시간)
+MAX_TRIES = 8                   # 연속 실패 허용 횟수
+LOCK_SECONDS = 10 * 60          # 초과 시 잠금 시간
+_SESSIONS = {}                  # 토큰 -> 만료 시각
+_TRIES = {}                     # IP -> [실패 횟수, 잠금 해제 시각]
+
+LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>학생 관리 · 로그인</title>
+<style>
+:root{--bg:#0f1115;--card:#171a21;--line:#262b36;--fg:#e8eaed;--mut:#9aa2b1;--acc:#7c5cff;--no:#c3453f}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Malgun Gothic",sans-serif}
+.box{width:340px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:28px 24px}
+h1{font-size:18px;margin:0 0 6px}
+p.sub{color:var(--mut);font-size:13px;margin:0 0 20px}
+input{width:100%;padding:12px 14px;border-radius:10px;border:1px solid var(--line);
+background:#0d0f14;color:var(--fg);font-size:16px;letter-spacing:.15em;text-align:center}
+button{width:100%;margin-top:12px;padding:12px;border-radius:10px;border:0;
+background:var(--acc);color:#fff;font-size:15px;cursor:pointer}
+.err{margin-top:14px;color:var(--no);font-size:13px;line-height:1.5}
+</style></head><body>
+<form class="box" method="post" action="/login" autocomplete="off">
+  <h1>학생 관리</h1>
+  <p class="sub">비밀번호를 입력하세요</p>
+  <input type="password" name="password" inputmode="numeric" autofocus>
+  <button type="submit">들어가기</button>
+  <div class="err">__MSG__</div>
+</form>
+</body></html>"""
+
 
 
 def tg_send_now(chat_id, text):
@@ -318,18 +355,69 @@ class AdminHandler(BaseHTTPRequestHandler):
             return xff.split(",")[0].strip()
         return self.client_address[0]
 
+    def _cookie_token(self):
+        raw = self.headers.get("Cookie", "")
+        for part in raw.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "hr_admin":
+                return v
+        return ""
+
     def _auth(self):
+        if not ADMIN_PASSWORD:
+            return False, "ADMIN_PASSWORD 환경변수가 설정되지 않았습니다"
+        tok = self._cookie_token()
+        exp = _SESSIONS.get(tok)
+        if not tok or not exp or exp < time.time():
+            if tok:
+                _SESSIONS.pop(tok, None)
+            return False, ""
+        return True, ""
+
+    def _lock_left(self):
+        rec = _TRIES.get(self._ip())
+        if rec and rec[1] > time.time():
+            return int(rec[1] - time.time())
+        return 0
+
+    def _login(self, msg="", code=200):
+        page = LOGIN_PAGE.replace("__MSG__", html.escape(msg))
+        return self._bytes(code, page.encode(), "text/html; charset=utf-8")
+
+    def _do_login(self, raw):
+        if not ADMIN_PASSWORD:
+            return self._login("ADMIN_PASSWORD 환경변수가 설정되지 않았습니다", 503)
+        left = self._lock_left()
+        if left:
+            return self._login("시도 횟수를 초과했습니다. " + str(left // 60 + 1) + "분 뒤에 다시 시도하세요.", 429)
+        pw = parse_qs(raw.decode("utf-8", "ignore")).get("password", [""])[0]
         ip = self._ip()
-        if not ADMIN_IPS:
-            return False, ip, "ADMIN_IPS 환경변수가 비어 있습니다"
-        if ip not in ADMIN_IPS:
-            return False, ip, "허용되지 않은 IP"
-        if ADMIN_TOKEN:
-            q = parse_qs(urlparse(self.path).query)
-            tok = q.get("token", [""])[0] or self.headers.get("X-Admin-Token", "")
-            if tok != ADMIN_TOKEN:
-                return False, ip, "토큰이 올바르지 않습니다"
-        return True, ip, ""
+        if hmac.compare_digest(pw, ADMIN_PASSWORD):
+            _TRIES.pop(ip, None)
+            now = time.time()
+            for k, v in list(_SESSIONS.items()):
+                if v < now:
+                    _SESSIONS.pop(k, None)
+            token = secrets.token_urlsafe(32)
+            _SESSIONS[token] = now + SESSION_TTL
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.send_header(
+                "Set-Cookie",
+                "hr_admin=" + token + "; Path=/; Max-Age=" + str(SESSION_TTL)
+                + "; HttpOnly; SameSite=Lax; Secure",
+            )
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        rec = _TRIES.get(ip, [0, 0.0])
+        rec[0] += 1
+        if rec[0] >= MAX_TRIES:
+            rec = [0, time.time() + LOCK_SECONDS]
+            _TRIES[ip] = rec
+            return self._login("시도 횟수를 초과했습니다. 10분 뒤에 다시 시도하세요.", 429)
+        _TRIES[ip] = rec
+        return self._login("비밀번호가 올바르지 않습니다. (남은 시도 " + str(MAX_TRIES - rec[0]) + "회)", 401)
 
     def _bytes(self, code, body, ctype):
         self.send_response(code)
@@ -358,27 +446,38 @@ class AdminHandler(BaseHTTPRequestHandler):
         self._bytes(403, page.encode(), "text/html; charset=utf-8")
 
     def do_GET(self):
-        ok, ip, why = self._auth()
         path = urlparse(self.path).path
         if path == "/healthz":
             return self._bytes(200, b"ok", "text/plain")
+        if path == "/logout":
+            _SESSIONS.pop(self._cookie_token(), None)
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.send_header("Set-Cookie", "hr_admin=; Path=/; Max-Age=0")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        ok, why = self._auth()
         if not ok:
-            return self._deny(ip, why)
+            return self._login(why)
         if path == "/api/list":
             days = sorted(int(k) for k in get_curriculum().keys())
             return self._json(200, {"subs": get_subscribers(), "days": days})
         return self._bytes(200, ADMIN_PAGE.encode(), "text/html; charset=utf-8")
 
     def do_POST(self):
-        ok, ip, why = self._auth()
-        if not ok:
-            return self._json(403, {"error": why, "ip": ip})
+        path = urlparse(self.path).path
         length = int(self.headers.get("Content-Length", "0") or 0)
+        raw = self.rfile.read(length) if length else b""
+        if path == "/login":
+            return self._do_login(raw)
+        ok, why = self._auth()
+        if not ok:
+            return self._json(401, {"error": why or "로그인이 필요합니다"})
         try:
-            body = json.loads(self.rfile.read(length) or b"{}")
+            body = json.loads(raw or b"{}")
         except Exception:
             body = {}
-        path = urlparse(self.path).path
         subs = get_subscribers()
         cid = str(body.get("chat_id", ""))
 
@@ -425,7 +524,7 @@ def start_admin_server():
     port = int(os.environ.get("PORT", "8080"))
     srv = ThreadingHTTPServer(("0.0.0.0", port), AdminHandler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    log.info("관리자 대시보드 시작 — 포트 %s, 허용 IP %s", port, ADMIN_IPS or "(미설정: 전부 차단)")
+    log.info("관리자 대시보드 시작 — 포트 %s, 비밀번호 %s", port, "설정됨" if ADMIN_PASSWORD else "미설정(접속 불가)")
 
 
 
