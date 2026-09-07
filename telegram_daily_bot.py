@@ -120,7 +120,9 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TEXT DEFAULT '',
     last_sent  TEXT DEFAULT '',
     course_started INTEGER DEFAULT 0,
-    started_at TEXT DEFAULT ''
+    started_at TEXT DEFAULT '',
+    status TEXT DEFAULT 'not_started',
+    start_day INTEGER DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS sends (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,6 +157,26 @@ def ensure_columns(conn):
         )
         conn.commit()
         log.info("users 테이블에 course_started / started_at 컬럼을 추가했습니다.")
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    added2 = False
+    if "status" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN status TEXT DEFAULT ''")
+        added2 = True
+    if "start_day" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN start_day INTEGER DEFAULT 1")
+        added2 = True
+    if added2:
+        conn.execute(
+            "UPDATE users SET status = CASE"
+            " WHEN COALESCE(active,1)=0 THEN 'inactive'"
+            " WHEN COALESCE(course_started,0)=0 THEN 'not_started'"
+            " ELSE 'active' END"
+            " WHERE COALESCE(status,'')=''"
+        )
+        conn.execute("UPDATE users SET start_day=1 WHERE COALESCE(start_day,0)<1")
+        conn.commit()
+        log.info("users 테이블에 status / start_day 컬럼을 추가했습니다.")
 
 
 def init_db():
@@ -281,15 +303,51 @@ def get_lesson_by_day(day):
     return row_to_lesson(r) if r else None
 
 
+STATUSES = ("not_started", "active", "paused", "completed", "inactive")
+SENDABLE = ("not_started", "active")
+
+
 def all_users(active_only=False):
     conn = db()
     q = "SELECT * FROM users"
     if active_only:
-        q += " WHERE active=1"
+        q += " WHERE COALESCE(status,'active') IN ('not_started','active') AND COALESCE(active,1)=1"
     q += " ORDER BY created_at ASC"
     rows = conn.execute(q).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def delete_user(chat_id):
+    """학생 한 명만 지운다. 레슨/음성 등 공용 자료는 건드리지 않는다."""
+    chat_id = str(chat_id)
+    with _db_lock:
+        conn = db()
+        cur = conn.execute("DELETE FROM users WHERE chat_id=?", (chat_id,))
+        conn.commit()
+        n = cur.rowcount
+        conn.close()
+    return n > 0
+
+
+def create_user(chat_id, fields):
+    chat_id = str(chat_id).strip()
+    if not chat_id.isdigit():
+        return False, "텔레그램 ID 는 숫자여야 합니다"
+    with _db_lock:
+        conn = db()
+        exists = conn.execute("SELECT 1 FROM users WHERE chat_id=?", (chat_id,)).fetchone()
+        if exists:
+            conn.close()
+            return False, "이미 등록된 텔레그램 사용자입니다"
+        conn.execute("INSERT INTO users (chat_id,created_at) VALUES (?,?)", (chat_id, ts()))
+        if fields:
+            cols = ", ".join(k + "=?" for k in fields)
+            conn.execute("UPDATE users SET " + cols + " WHERE chat_id=?",
+                         tuple(fields.values()) + (chat_id,))
+        conn.commit()
+        conn.close()
+    return True, ""
 
 
 def get_user(chat_id):
@@ -574,7 +632,7 @@ def claim_course_start(chat_id):
         if row is None:
             conn.execute("INSERT INTO users (chat_id,created_at) VALUES (?,?)", (chat_id, ts()))
         cur = conn.execute(
-            "UPDATE users SET course_started=1, started_at=?, day=1"
+            "UPDATE users SET course_started=1, started_at=?, day=1, status='active', active=1"
             " WHERE chat_id=? AND COALESCE(course_started,0)=0",
             (ts(), chat_id),
         )
@@ -921,23 +979,88 @@ class Admin(BaseHTTPRequestHandler):
         if path == "/api/lesson/media-delete":
             return self._media_delete(b)
         if path == "/api/user/update":
-            cid = str(b.get("chat_id", ""))
-            if not get_user(cid):
-                return self._json(404, {"error": "등록되지 않은 chat_id"})
-            fields = {}
-            if "plan" in b:
-                fields["plan"] = "premium" if b["plan"] == "premium" else "free"
-            if "day" in b:
-                try:
-                    fields["day"] = max(0, min(365, int(b["day"])))
-                except Exception:
-                    pass
-            if "active" in b:
-                fields["active"] = 1 if b["active"] else 0
-            if fields:
-                upsert_user(cid, **fields)
-            return self._json(200, {"ok": True, "user": get_user(cid)})
+            return self._user_update(b)
+        if path == "/api/user/create":
+            return self._user_create(b)
+        if path == "/api/user/delete":
+            return self._user_delete(b)
+        if path == "/api/user/reset":
+            return self._user_reset(b)
         return self._json(404, {"error": "알 수 없는 경로"})
+
+    # --- 학생 관리 ---
+    def _user_fields(self, b):
+        fields = {}
+        if "name" in b:
+            fields["name"] = str(b.get("name") or "")[:80]
+        if "username" in b:
+            fields["username"] = str(b.get("username") or "").lstrip("@")[:60]
+        if "plan" in b:
+            fields["plan"] = "premium" if b.get("plan") == "premium" else "free"
+        if "day" in b:
+            try:
+                fields["day"] = max(0, min(365, int(b.get("day") or 0)))
+            except Exception:
+                pass
+        if "start_day" in b:
+            try:
+                fields["start_day"] = max(1, min(365, int(b.get("start_day") or 1)))
+            except Exception:
+                pass
+        if "started_at" in b:
+            fields["started_at"] = str(b.get("started_at") or "")[:19].replace("T", " ")
+        if "status" in b:
+            st = b.get("status")
+            if st in STATUSES:
+                fields["status"] = st
+                fields["active"] = 0 if st in ("paused", "inactive") else 1
+                if st == "not_started":
+                    fields["course_started"] = 0
+                elif st in ("active", "paused", "completed"):
+                    fields["course_started"] = 1
+        if "active" in b and "status" not in b:
+            fields["active"] = 1 if b.get("active") else 0
+        return fields
+
+    def _user_update(self, b):
+        cid = str(b.get("chat_id", ""))
+        if not get_user(cid):
+            return self._json(404, {"error": "등록되지 않은 학생입니다"})
+        fields = self._user_fields(b)
+        if fields:
+            upsert_user(cid, **fields)
+        return self._json(200, {"ok": True, "user": get_user(cid)})
+
+    def _user_create(self, b):
+        cid = str(b.get("chat_id", "")).strip()
+        if not cid:
+            return self._json(400, {"error": "텔레그램 ID 를 입력하세요"})
+        fields = self._user_fields(b)
+        fields.setdefault("status", "not_started")
+        fields.setdefault("start_day", 1)
+        if "day" not in fields:
+            fields["day"] = max(0, int(fields.get("start_day", 1)) - 1)
+        ok, err = create_user(cid, fields)
+        if not ok:
+            return self._json(409, {"error": err})
+        return self._json(200, {"ok": True, "user": get_user(cid)})
+
+    def _user_delete(self, b):
+        cid = str(b.get("chat_id", ""))
+        if not get_user(cid):
+            return self._json(404, {"error": "등록되지 않은 학생입니다"})
+        delete_user(cid)
+        return self._json(200, {"ok": True})
+
+    def _user_reset(self, b):
+        cid = str(b.get("chat_id", ""))
+        u = get_user(cid)
+        if not u:
+            return self._json(404, {"error": "등록되지 않은 학생입니다"})
+        start_day = max(1, int(u.get("start_day") or 1))
+        upsert_user(cid, day=start_day - 1, course_started=0, started_at="",
+                    status="not_started", last_sent="")
+        return self._json(200, {"ok": True, "user": get_user(cid)})
 
     # --- 레슨 처리 ---
     def _save_lesson(self, b):
@@ -1190,9 +1313,24 @@ audio{width:260px;height:34px}
   </section>
 
   <section id="p-users" class="hidden">
-    <div class="bar"><span class="muted" id="userMeta"></span></div>
+    <div class="bar">
+      <button class="b p" data-act="unew">+ 학생 추가</button>
+      <input type="text" id="uq" placeholder="ID · 아이디 · 이름 검색" style="width:220px">
+      <select id="ufs">
+        <option value="">상태 전체</option>
+        <option value="not_started">시작 전</option>
+        <option value="active">진행 중</option>
+        <option value="paused">일시정지</option>
+        <option value="completed">수료</option>
+        <option value="inactive">비활성</option>
+      </select>
+      <select id="ufd">
+        <option value="">DAY 전체</option>
+      </select>
+      <span class="muted" id="userMeta"></span>
+    </div>
     <div class="card"><table>
-      <thead><tr><th>chat_id</th><th>이름</th><th>아이디</th><th>등록일</th><th>진도</th><th>요금제</th><th>상태</th><th>마지막 발송</th><th>작업</th></tr></thead>
+      <thead><tr><th>ID</th><th>이름 / 아이디</th><th>등록일</th><th>시작일</th><th>시작 DAY</th><th>현재 DAY</th><th>상태</th><th>요금제</th><th>마지막 발송</th><th>작업</th></tr></thead>
       <tbody id="userRows"></tbody>
     </table></div>
   </section>
@@ -1252,6 +1390,37 @@ audio{width:260px;height:34px}
   <div class="foot"><div class="right"><button class="b" onclick="closeModal('previewBox')">닫기</button></div></div>
 </div></div>
 
+<div class="modal" id="student"><div class="sheet" style="max-width:620px">
+  <h2 id="stTitle">학생 정보</h2>
+  <div class="grid two">
+    <label>텔레그램 ID<input type="text" id="s-id" placeholder="숫자만"></label>
+    <label>텔레그램 아이디<input type="text" id="s-username" placeholder="@ 없이"></label>
+    <label>이름<input type="text" id="s-name"></label>
+    <label>요금제
+      <select id="s-plan"><option value="free">free</option><option value="premium">premium</option></select>
+    </label>
+    <label>시작 DAY<input type="number" id="s-startday" min="1" value="1"></label>
+    <label>현재 DAY<input type="number" id="s-day" min="0" value="0"></label>
+    <label>코스 시작일<input type="datetime-local" id="s-startedat"></label>
+    <label>상태
+      <select id="s-status">
+        <option value="not_started">시작 전</option>
+        <option value="active">진행 중</option>
+        <option value="paused">일시정지</option>
+        <option value="completed">수료</option>
+        <option value="inactive">비활성</option>
+      </select>
+    </label>
+  </div>
+  <div class="muted" id="stHint">일시정지 · 비활성 상태의 학생에게는 예약 발송이 나가지 않습니다.</div>
+  <div class="foot">
+    <div class="right">
+      <button class="b" onclick="closeModal('student')">닫기</button>
+      <button class="b p" data-act="ussave">저장</button>
+    </div>
+  </div>
+</div></div>
+
 <div class="toast" id="toast"></div>
 """
 
@@ -1304,41 +1473,111 @@ function loadLessons(){
   });
 }
 
+function statusKo(s){
+  return s==="active"?"진행 중":s==="paused"?"일시정지":s==="completed"?"수료":
+         s==="inactive"?"비활성":"시작 전";
+}
+function statusClass(s){
+  return s==="active"?"b-premium":s==="completed"?"b-scheduled":"b-draft";
+}
+
 function loadUsers(){
-  fetch("/api/users").then(function(r){return r.json();}).then(function(d){
+  return fetch("/api/users").then(function(r){return r.json();}).then(function(d){
     USERS = d.users||[];
-    var free=0, prem=0, act=0;
-    var tb=document.getElementById("userRows"); tb.innerHTML="";
-    USERS.forEach(function(u){
-      if(u.plan==="premium") prem++; else free++;
-      if(u.active) act++;
-      var id = esc(u.chat_id);
-      var tr=document.createElement("tr");
-      tr.innerHTML =
-        "<td>"+id+"</td>"+
-        "<td>"+esc(u.name||"-")+"</td>"+
-        "<td>"+(u.username? "@"+esc(u.username) : "<span class=muted>-</span>")+"</td>"+
-        "<td class=muted>"+esc((u.created_at||"").slice(0,10))+"</td>"+
-        "<td><div class=row><input type=number style='width:70px' value='"+(u.day||0)+"' data-day='"+id+"'>"+
-          "<button class=b data-act=uday data-uid='"+id+"'>저장</button></div></td>"+
-        "<td><span class='badge b-"+(u.plan==="premium"?"premium":"free")+"'>"+esc(u.plan||"free")+"</span> "+
-          "<button class=b data-act=uplan data-uid='"+id+"' data-val='"+(u.plan==="premium"?"free":"premium")+"'>"+
-          (u.plan==="premium"?"→ free":"→ premium")+"</button></td>"+
-        "<td>"+(u.active? "활성" : "<span class=muted>중지</span>")+
-          " <button class=b data-act=uactive data-uid='"+id+"' data-val='"+(u.active?0:1)+"'>"+(u.active?"중지":"활성")+"</button></td>"+
-        "<td class=muted>"+esc(u.last_sent||"-")+"</td>"+
-        "<td><div class=row><select data-send='"+id+"'></select>"+
-          "<button class=b data-act=usend data-uid='"+id+"'>보내기</button></div></td>";
-      tb.appendChild(tr);
-      var sel = tr.querySelector("select");
+    var sel = document.getElementById("ufd");
+    if(sel && sel.options.length<=1){
       LESSONS.forEach(function(L){
-        var o=document.createElement("option"); o.value=L.id;
-        o.textContent="DAY "+L.day; if(L.day===(u.day||0)+1) o.selected=true;
-        sel.appendChild(o);
+        var o=document.createElement("option"); o.value=L.day; o.textContent="DAY "+L.day; sel.appendChild(o);
       });
+    }
+    renderUsers();
+  });
+}
+
+function renderUsers(){
+  var q = (document.getElementById("uq").value||"").toLowerCase().trim();
+  var fs = document.getElementById("ufs").value;
+  var fd = document.getElementById("ufd").value;
+  var tb=document.getElementById("userRows"); tb.innerHTML="";
+  var free=0, prem=0, act=0, shown=0;
+  USERS.forEach(function(u){
+    var st = u.status || "not_started";
+    if(u.plan==="premium") prem++; else free++;
+    if(st==="active") act++;
+    if(q){
+      var hay = (u.chat_id+" "+(u.username||"")+" "+(u.name||"")).toLowerCase();
+      if(hay.indexOf(q)<0) return;
+    }
+    if(fs && st!==fs) return;
+    if(fd && String(u.day||0)!==String(fd)) return;
+    shown++;
+    var id = esc(u.chat_id);
+    var tr=document.createElement("tr");
+    tr.innerHTML =
+      "<td>"+id+"</td>"+
+      "<td>"+esc(u.name||"-")+"<div class=muted>"+(u.username? "@"+esc(u.username):"")+"</div></td>"+
+      "<td class=muted>"+esc((u.created_at||"").slice(0,10))+"</td>"+
+      "<td class=muted>"+esc((u.started_at||"").slice(0,10)||"-")+"</td>"+
+      "<td>"+(u.start_day||1)+"</td>"+
+      "<td><b>"+(u.day||0)+"</b></td>"+
+      "<td><span class='badge "+statusClass(st)+"'>"+statusKo(st)+"</span></td>"+
+      "<td><span class='badge b-"+(u.plan==="premium"?"premium":"free")+"'>"+esc(u.plan||"free")+"</span></td>"+
+      "<td class=muted>"+esc(u.last_sent||"-")+"</td>"+
+      "<td><div class=row>"+
+        "<select data-send='"+id+"'></select>"+
+        "<button class=b data-act=usend data-uid='"+id+"'>보내기</button>"+
+        "<button class=b data-act=uedit data-uid='"+id+"'>편집</button>"+
+        (st==="paused"||st==="inactive"
+          ? "<button class=b data-act=ustatus data-uid='"+id+"' data-val=active>활성</button>"
+          : "<button class=b data-act=ustatus data-uid='"+id+"' data-val=paused>일시정지</button>")+
+        "<button class=b data-act=ureset data-uid='"+id+"'>진도 초기화</button>"+
+        "<button class='b d' data-act=udel data-uid='"+id+"'>삭제</button>"+
+      "</div></td>";
+    tb.appendChild(tr);
+    var s = tr.querySelector("select");
+    LESSONS.forEach(function(L){
+      var o=document.createElement("option"); o.value=L.id;
+      o.textContent="DAY "+L.day; if(L.day===(u.day||0)+1) o.selected=true;
+      s.appendChild(o);
     });
-    document.getElementById("userMeta").textContent =
-      "전체 "+USERS.length+"명 · 활성 "+act+" · 무료 "+free+" · 유료 "+prem;
+  });
+  document.getElementById("userMeta").textContent =
+    "표시 "+shown+" / 전체 "+USERS.length+"명 · 진행 중 "+act+" · 무료 "+free+" · 유료 "+prem;
+}
+
+function openStudent(uid){
+  var u = uid ? USERS.filter(function(x){return String(x.chat_id)===String(uid);})[0] : null;
+  document.getElementById("stTitle").textContent = u ? ("학생 편집 — "+u.chat_id) : "학생 추가";
+  document.getElementById("s-id").value = u ? u.chat_id : "";
+  document.getElementById("s-id").disabled = !!u;
+  document.getElementById("s-username").value = u ? (u.username||"") : "";
+  document.getElementById("s-name").value = u ? (u.name||"") : "";
+  document.getElementById("s-plan").value = u ? (u.plan||"free") : "free";
+  document.getElementById("s-startday").value = u ? (u.start_day||1) : 1;
+  document.getElementById("s-day").value = u ? (u.day||0) : 0;
+  document.getElementById("s-startedat").value = u ? (u.started_at||"").replace(" ","T").slice(0,16) : "";
+  document.getElementById("s-status").value = u ? (u.status||"not_started") : "not_started";
+  document.getElementById("student").classList.add("on");
+}
+
+function saveStudent(){
+  var isNew = !document.getElementById("s-id").disabled;
+  var body = {
+    chat_id: document.getElementById("s-id").value.trim(),
+    username: document.getElementById("s-username").value.trim(),
+    name: document.getElementById("s-name").value.trim(),
+    plan: document.getElementById("s-plan").value,
+    start_day: document.getElementById("s-startday").value,
+    day: document.getElementById("s-day").value,
+    started_at: document.getElementById("s-startedat").value,
+    status: document.getElementById("s-status").value
+  };
+  if(!body.chat_id){ toast("텔레그램 ID 를 입력하세요"); return; }
+  api(isNew ? "/api/user/create" : "/api/user/update", body).then(function(r){
+    if(!r.ok){ toast(r.error||"저장 실패"); return; }
+    toast(isNew ? "학생을 추가했습니다" : "저장했습니다");
+    closeModal("student");
+    loadUsers();
   });
 }
 
@@ -1522,20 +1761,24 @@ document.addEventListener("click", function(e){
       .then(function(r){ if(r.ok){ CUR=r.lesson; renderMedia(); toast("삭제했습니다"); } });
     return;
   }
-  if(act==="uday"){
-    var inp = document.querySelector("input[data-day='"+uid+"']");
-    api("/api/user/update", {chat_id: uid, day: inp.value}).then(function(r){
-      toast(r.ok ? "진도를 저장했습니다" : ("실패: "+(r.error||""))); loadUsers();
-    }); return;
-  }
-  if(act==="uplan"){
-    api("/api/user/update", {chat_id: uid, plan: val}).then(function(r){
-      toast(r.ok ? "요금제를 변경했습니다" : ("실패: "+(r.error||""))); loadUsers();
-    }); return;
-  }
-  if(act==="uactive"){
-    api("/api/user/update", {chat_id: uid, active: val==="1"}).then(function(r){
+  if(act==="unew"){ openStudent(null); return; }
+  if(act==="uedit"){ openStudent(uid); return; }
+  if(act==="ussave"){ saveStudent(); return; }
+  if(act==="ustatus"){
+    api("/api/user/update", {chat_id: uid, status: val}).then(function(r){
       toast(r.ok ? "상태를 변경했습니다" : ("실패: "+(r.error||""))); loadUsers();
+    }); return;
+  }
+  if(act==="ureset"){
+    if(!confirm("이 학생의 진도를 초기화할까요? 시작 DAY 이전 상태로 되돌립니다.")) return;
+    api("/api/user/reset", {chat_id: uid}).then(function(r){
+      toast(r.ok ? "진도를 초기화했습니다" : ("실패: "+(r.error||""))); loadUsers();
+    }); return;
+  }
+  if(act==="udel"){
+    if(!confirm("이 학생을 삭제할까요?\\n삭제하면 되돌릴 수 없습니다. 레슨과 음성 파일은 그대로 남습니다.")) return;
+    api("/api/user/delete", {chat_id: uid}).then(function(r){
+      toast(r.ok ? "삭제했습니다" : ("실패: "+(r.error||""))); loadUsers();
     }); return;
   }
   if(act==="usend"){
@@ -1558,6 +1801,11 @@ document.addEventListener("click", function(e){
 
 document.addEventListener("keydown", function(e){
   if(e.key === "Escape"){ closeModal("previewBox"); }
+});
+
+["uq","ufs","ufd"].forEach(function(id){
+  var el = document.getElementById(id);
+  if(el) el.addEventListener("input", renderUsers);
 });
 
 loadLessons();
