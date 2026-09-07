@@ -118,7 +118,9 @@ CREATE TABLE IF NOT EXISTS users (
     plan       TEXT DEFAULT 'free',
     active     INTEGER DEFAULT 1,
     created_at TEXT DEFAULT '',
-    last_sent  TEXT DEFAULT ''
+    last_sent  TEXT DEFAULT '',
+    course_started INTEGER DEFAULT 0,
+    started_at TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS sends (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,11 +137,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_lessons_day ON lessons(day);
 """
 
 
+def ensure_columns(conn):
+    """기존 DB 에 없는 컬럼을 채운다 (한 번만 실행되는 효과)."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    added = False
+    if "course_started" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN course_started INTEGER DEFAULT 0")
+        added = True
+    if "started_at" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN started_at TEXT DEFAULT ''")
+        added = True
+    if added:
+        # 이미 진도가 있는 사람은 코스를 시작한 것으로 본다.
+        conn.execute(
+            "UPDATE users SET course_started=1, started_at=COALESCE(NULLIF(started_at,''), created_at)"
+            " WHERE day >= 1"
+        )
+        conn.commit()
+        log.info("users 테이블에 course_started / started_at 컬럼을 추가했습니다.")
+
+
 def init_db():
     with _db_lock:
         conn = db()
         conn.executescript(SCHEMA)
         conn.commit()
+        ensure_columns(conn)
         migrate_legacy(conn)
         conn.close()
 
@@ -538,11 +561,51 @@ async def scheduler_loop():
 # ---------- 텔레그램 봇 명령어 ----------
 
 
+def claim_course_start(chat_id):
+    """코스 시작을 한 번만 허용한다. 처음 시작하는 경우에만 True 를 돌려준다.
+
+    UPDATE ... WHERE course_started=0 한 문장으로 처리하므로
+    버튼을 연타해도 두 번 시작되지 않는다.
+    """
+    chat_id = str(chat_id)
+    with _db_lock:
+        conn = db()
+        row = conn.execute("SELECT chat_id FROM users WHERE chat_id=?", (chat_id,)).fetchone()
+        if row is None:
+            conn.execute("INSERT INTO users (chat_id,created_at) VALUES (?,?)", (chat_id, ts()))
+        cur = conn.execute(
+            "UPDATE users SET course_started=1, started_at=?, day=1"
+            " WHERE chat_id=? AND COALESCE(course_started,0)=0",
+            (ts(), chat_id),
+        )
+        conn.commit()
+        changed = cur.rowcount
+        conn.close()
+    return changed == 1
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     u = update.effective_user
     name = " ".join(x for x in [getattr(u, "first_name", None), getattr(u, "last_name", None)] if x)
     upsert_user(chat_id, name=name, username=getattr(u, "username", "") or "", active=1)
+
+    user = get_user(chat_id) or {}
+    already = int(user.get("course_started") or 0) == 1
+    day = int(user.get("day") or 0)
+
+    if already:
+        # 이미 시작한 사람에게는 버튼을 다시 보여주지 않는다. 진도도 건드리지 않는다.
+        await update.message.reply_text(
+            "\ub2e4\uc2dc \uc624\uc168\ub124\uc694! \uc774\ubbf8 \ud559\uc2b5\uc744 \uc2dc\uc791\ud558\uc168\uc2b5\ub2c8\ub2e4.\n"
+            "\ud604\uc7ac \uc9c4\ub3c4: DAY " + str(max(day, 1)) + "\n\n"
+            "\u0421 \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0435\u043D\u0438\u0435\u043C! \u0412\u044B \u0443\u0436\u0435 \u043D\u0430\u0447\u0430\u043B\u0438 \u043A\u0443\u0440\u0441.\n"
+            "\u0422\u0435\u043A\u0443\u0449\u0438\u0439 \u0434\u0435\u043D\u044C: DAY " + str(max(day, 1)) + "\n\n"
+            "\uc624\ub298 \ubd84\ub7c9\uc744 \ub2e4\uc2dc \ubcf4\ub824\uba74 /today \ub97c \uc785\ub825\ud558\uc138\uc694.\n"
+            "\u0427\u0442\u043E\u0431\u044B \u043F\u043E\u0441\u043C\u043E\u0442\u0440\u0435\u0442\u044C \u0443\u0440\u043E\u043A, \u0432\u0432\u0435\u0434\u0438\u0442\u0435 /today."
+        )
+        return
+
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("\U0001F331 \uccab\ub0a0 \uc2dc\uc791\ud558\uae30 / \u041D\u0430\u0447\u0430\u0442\u044C DAY 1", callback_data="start_day1")]]
     )
@@ -558,13 +621,31 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cb_start_day1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     chat_id = str(query.message.chat.id)
+
+    # 버튼을 먼저 없앤다 (연타 방지 + 다시 눌리지 않게)
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    user = get_user(chat_id)
+    if user and int(user.get("course_started") or 0) == 1:
+        await query.answer("\uc774\ubbf8 \uc2dc\uc791\ud558\uc168\uc5b4\uc694 / \u0412\u044B \u0443\u0436\u0435 \u043D\u0430\u0447\u0430\u043B\u0438", show_alert=False)
+        return
+
     lesson = get_lesson_by_day(1)
     if not lesson:
+        await query.answer()
         await query.message.reply_text("DAY 1 \ub0b4\uc6a9\uc774 \uc544\uc9c1 \uc900\ube44\ub418\uc9c0 \uc54a\uc558\uc2b5\ub2c8\ub2e4.")
         return
-    upsert_user(chat_id, day=1)
+
+    # DB 한 문장으로 선점한다. 이미 시작된 상태면 False.
+    if not claim_course_start(chat_id):
+        await query.answer("\uc774\ubbf8 \uc2dc\uc791\ud558\uc168\uc5b4\uc694 / \u0412\u044B \u0443\u0436\u0435 \u043D\u0430\u0447\u0430\u043B\u0438", show_alert=False)
+        return
+
+    await query.answer()
     await asyncio.to_thread(send_lesson_to, chat_id, lesson, "manual")
 
 
@@ -575,7 +656,7 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     day = int(user.get("day") or 0)
     if day < 1:
         day = 1
-        upsert_user(chat_id, day=1)
+        claim_course_start(chat_id)
     if is_locked(user, day):
         await update.message.reply_text(paywall_text())
         return
