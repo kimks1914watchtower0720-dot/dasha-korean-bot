@@ -23,7 +23,13 @@ import json
 import os
 import logging
 import asyncio
+import html
+import threading
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 
 import pytz
@@ -116,7 +122,10 @@ def paywall_message():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     subs = get_subscribers()
-    subs.setdefault(chat_id, {"day": 0, "plan": "free"})
+    info = subs.setdefault(chat_id, {"day": 0, "plan": "free"})
+    u = update.effective_user
+    info["name"] = " ".join(x for x in [getattr(u, "first_name", None), getattr(u, "last_name", None)] if x)
+    info["username"] = getattr(u, "username", "") or ""
     save_subscribers(subs)
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("🌱 첫날 시작하기 / Начать DAY 1", callback_data="start_day1")]]
@@ -201,6 +210,225 @@ async def start_day1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text(build_lesson_message(1), parse_mode="HTML")
 
 
+ADMIN_PAGE = """<!DOCTYPE html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>학생 관리</title>
+<style>
+:root{--bg:#0f1115;--card:#171a21;--line:#262b36;--fg:#e8eaed;--mut:#9aa2b1;--acc:#7c5cff;--ok:#2ea36b;--warn:#c9a227}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Malgun Gothic",sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:28px 18px 60px}
+h1{font-size:22px;margin:0 0 6px}
+.meta{color:var(--mut);font-size:13px;margin-bottom:20px}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+th,td{padding:11px 12px;border-bottom:1px solid var(--line);font-size:14px;text-align:left;vertical-align:middle}
+th{color:var(--mut);font-weight:600;font-size:12px;letter-spacing:.03em;text-transform:uppercase}
+tr:last-child td{border-bottom:0}
+.badge{padding:3px 9px;border-radius:999px;font-size:12px;font-weight:600}
+.free{background:rgba(154,162,177,.18);color:#c3c9d4}
+.premium{background:rgba(46,163,107,.18);color:#59d39a}
+button{padding:7px 11px;border-radius:8px;border:1px solid var(--line);background:#0d0f14;color:var(--fg);font-size:13px;cursor:pointer}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+button:disabled{opacity:.5;cursor:default}
+input[type=number],select{width:74px;padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:#0d0f14;color:var(--fg);font-size:13px}
+.row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#0d0f14;border:1px solid var(--line);padding:10px 16px;border-radius:10px;font-size:14px;opacity:0;transition:opacity .2s}
+.toast.on{opacity:1}
+.sub{color:var(--mut);font-size:12px}
+</style></head><body><div class="wrap">
+<h1>학생 관리</h1>
+<div class="meta" id="meta">불러오는 중...</div>
+<table><thead><tr><th>chat_id</th><th>이름</th><th>요금제</th><th>진도(DAY)</th><th>마지막 발송</th><th>발송</th></tr></thead><tbody id="tb"></tbody></table>
+<div class="toast" id="toast"></div>
+</div>
+<script>
+var TOKEN = new URLSearchParams(location.search).get("token") || "";
+var DAYS = [];
+function q(p){ return TOKEN ? p + (p.indexOf("?")>-1?"&":"?") + "token=" + encodeURIComponent(TOKEN) : p; }
+function toast(m){ var t=document.getElementById("toast"); t.textContent=m; t.classList.add("on"); setTimeout(function(){t.classList.remove("on");},2200); }
+function post(path, body){ return fetch(q(path),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json();}); }
+function load(){
+  fetch(q("/api/list")).then(function(r){return r.json();}).then(function(d){
+    DAYS = d.days || [];
+    var subs = d.subs || {};
+    var ids = Object.keys(subs);
+    var free = 0, prem = 0;
+    var tb = document.getElementById("tb"); tb.innerHTML = "";
+    ids.forEach(function(id){
+      var s = subs[id];
+      if (s.plan === "premium") prem++; else free++;
+      var tr = document.createElement("tr");
+      var name = (s.name || "") + (s.username ? " (@" + s.username + ")" : "");
+      var opts = DAYS.map(function(n){ return "<option value=" + n + (n === (s.day||0)+1 ? " selected" : "") + ">DAY " + n + "</option>"; }).join("");
+      tr.innerHTML =
+        "<td>" + id + "</td>" +
+        "<td>" + (name || "<span class=sub>-</span>") + "</td>" +
+        "<td><span class='badge " + (s.plan==="premium"?"premium":"free") + "'>" + (s.plan||"free") + "</span> <button data-act=plan data-id='" + id + "'>" + (s.plan==="premium"?"→ free":"→ premium") + "</button></td>" +
+        "<td><div class=row><input type=number min=0 max=30 value='" + (s.day||0) + "' data-day='" + id + "'><button data-act=day data-id='" + id + "'>저장</button></div></td>" +
+        "<td>" + (s.last_sent || "<span class=sub>-</span>") + "</td>" +
+        "<td><div class=row><select data-send='" + id + "'>" + opts + "</select><button class=primary data-act=send data-id='" + id + "'>발송</button><label class=sub><input type=checkbox data-adv='" + id + "'> 진도 반영</label></div></td>";
+      tb.appendChild(tr);
+    });
+    document.getElementById("meta").textContent = "전체 " + ids.length + "명 · 무료 " + free + "명 · 유료 " + prem + "명";
+  });
+}
+document.addEventListener("click", function(e){
+  var b = e.target.closest("button[data-act]"); if(!b) return;
+  var id = b.getAttribute("data-id"); var act = b.getAttribute("data-act");
+  b.disabled = true;
+  if (act === "plan") {
+    var cur = b.textContent.indexOf("premium") > -1 ? "premium" : "free";
+    post("/api/plan", {chat_id:id, plan:cur}).then(function(r){ b.disabled=false; toast(r.ok?"요금제 변경됨":"실패: "+(r.error||"")); load(); });
+  } else if (act === "day") {
+    var v = document.querySelector("input[data-day='" + id + "']").value;
+    post("/api/day", {chat_id:id, day:v}).then(function(r){ b.disabled=false; toast(r.ok?"진도 저장됨":"실패: "+(r.error||"")); load(); });
+  } else if (act === "send") {
+    var d = document.querySelector("select[data-send='" + id + "']").value;
+    var adv = document.querySelector("input[data-adv='" + id + "']").checked;
+    post("/api/send", {chat_id:id, day:d, advance:adv}).then(function(r){ b.disabled=false; toast(r.ok?("DAY "+d+" 발송 완료"):"실패: "+(r.error||"")); load(); });
+  }
+});
+load();
+setInterval(load, 30000);
+</script></body></html>"""
+
+
+# ---------- 관리자 대시보드 (IP 제한) ----------
+
+ADMIN_IPS = [x.strip() for x in os.environ.get("ADMIN_IPS", "").split(",") if x.strip()]
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+
+
+def tg_send_now(chat_id, text):
+    """봇 이벤트 루프와 무관하게 텔레그램 API로 바로 보낸다."""
+    data = urllib.parse.urlencode(
+        {"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"}
+    ).encode()
+    url = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage"
+    with urllib.request.urlopen(url, data, timeout=20) as r:
+        return r.status
+
+
+class AdminHandler(BaseHTTPRequestHandler):
+    server_version = "dasha-admin"
+
+    def _ip(self):
+        xff = self.headers.get("X-Forwarded-For", "")
+        if xff:
+            return xff.split(",")[0].strip()
+        return self.client_address[0]
+
+    def _auth(self):
+        ip = self._ip()
+        if not ADMIN_IPS:
+            return False, ip, "ADMIN_IPS 환경변수가 비어 있습니다"
+        if ip not in ADMIN_IPS:
+            return False, ip, "허용되지 않은 IP"
+        if ADMIN_TOKEN:
+            q = parse_qs(urlparse(self.path).query)
+            tok = q.get("token", [""])[0] or self.headers.get("X-Admin-Token", "")
+            if tok != ADMIN_TOKEN:
+                return False, ip, "토큰이 올바르지 않습니다"
+        return True, ip, ""
+
+    def _bytes(self, code, body, ctype):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Robots-Tag", "noindex, nofollow")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, code, obj):
+        self._bytes(code, json.dumps(obj, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
+    def _deny(self, ip, why):
+        page = (
+            "<!DOCTYPE html><html lang=ko><head><meta charset=utf-8>"
+            "<title>접근 차단</title><style>body{background:#0f1115;color:#e8eaed;"
+            "font-family:system-ui,sans-serif;padding:40px;line-height:1.7}"
+            "b{color:#7c5cff}</style></head><body>"
+            "<h2>접근이 차단되었습니다</h2>"
+            "<p>사유: " + html.escape(why) + "</p>"
+            "<p>현재 접속 IP: <b>" + html.escape(ip) + "</b></p>"
+            "<p>Railway 환경변수 <b>ADMIN_IPS</b> 에 이 IP를 넣으면 접속됩니다.</p>"
+            "</body></html>"
+        )
+        self._bytes(403, page.encode(), "text/html; charset=utf-8")
+
+    def do_GET(self):
+        ok, ip, why = self._auth()
+        path = urlparse(self.path).path
+        if path == "/healthz":
+            return self._bytes(200, b"ok", "text/plain")
+        if not ok:
+            return self._deny(ip, why)
+        if path == "/api/list":
+            days = sorted(int(k) for k in get_curriculum().keys())
+            return self._json(200, {"subs": get_subscribers(), "days": days})
+        return self._bytes(200, ADMIN_PAGE.encode(), "text/html; charset=utf-8")
+
+    def do_POST(self):
+        ok, ip, why = self._auth()
+        if not ok:
+            return self._json(403, {"error": why, "ip": ip})
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except Exception:
+            body = {}
+        path = urlparse(self.path).path
+        subs = get_subscribers()
+        cid = str(body.get("chat_id", ""))
+
+        if path == "/api/plan":
+            if cid not in subs:
+                return self._json(404, {"error": "등록되지 않은 chat_id"})
+            subs[cid]["plan"] = "premium" if body.get("plan") == "premium" else "free"
+            save_subscribers(subs)
+            return self._json(200, {"ok": True, "sub": subs[cid]})
+
+        if path == "/api/day":
+            if cid not in subs:
+                return self._json(404, {"error": "등록되지 않은 chat_id"})
+            try:
+                day = int(body.get("day", 0))
+            except Exception:
+                day = 0
+            subs[cid]["day"] = max(0, min(30, day))
+            save_subscribers(subs)
+            return self._json(200, {"ok": True, "sub": subs[cid]})
+
+        if path == "/api/send":
+            try:
+                day = int(body.get("day", 1))
+            except Exception:
+                day = 1
+            try:
+                status = tg_send_now(cid, build_lesson_message(day))
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
+            if body.get("advance") and cid in subs:
+                subs[cid]["day"] = day
+                subs[cid]["last_sent"] = datetime.now(KST).strftime("%Y-%m-%d")
+                save_subscribers(subs)
+            return self._json(200, {"ok": True, "status": status})
+
+        return self._json(404, {"error": "알 수 없는 경로"})
+
+    def log_message(self, *args):
+        pass
+
+
+def start_admin_server():
+    port = int(os.environ.get("PORT", "8080"))
+    srv = ThreadingHTTPServer(("0.0.0.0", port), AdminHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    log.info("관리자 대시보드 시작 — 포트 %s, 허용 IP %s", port, ADMIN_IPS or "(미설정: 전부 차단)")
+
+
+
 def build_lesson_message(day: int) -> str:
     curriculum = get_curriculum()
     lesson = curriculum.get(str(day))
@@ -282,6 +510,7 @@ async def _start_scheduler(app):
 
 
 def main():
+    start_admin_server()
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(_start_scheduler).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("today", today))
