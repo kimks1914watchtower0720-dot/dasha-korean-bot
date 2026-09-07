@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS lessons (
     sort_order   INTEGER DEFAULT 0,
     sent_at      TEXT DEFAULT '',
     sent_body    TEXT DEFAULT '',
+    work_status  TEXT DEFAULT 'editing',
     updated_at   TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS users (
@@ -157,6 +158,13 @@ def ensure_columns(conn):
         )
         conn.commit()
         log.info("users 테이블에 course_started / started_at 컬럼을 추가했습니다.")
+
+    lcols = {r["name"] for r in conn.execute("PRAGMA table_info(lessons)").fetchall()}
+    if "work_status" not in lcols:
+        conn.execute("ALTER TABLE lessons ADD COLUMN work_status TEXT DEFAULT 'editing'")
+        conn.execute("UPDATE lessons SET work_status='editing' WHERE COALESCE(work_status,'')=''")
+        conn.commit()
+        log.info("lessons 테이블에 work_status 컬럼을 추가했습니다.")
 
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
     added2 = False
@@ -1103,6 +1111,7 @@ class Admin(BaseHTTPRequestHandler):
             "scheduled_at": (b.get("scheduled_at") or "").replace("T", " ")[:16],
             "status": b.get("status") if b.get("status") in
                       (STATUS_DRAFT, STATUS_SCHEDULED, STATUS_SENT) else STATUS_DRAFT,
+            "work_status": "completed" if b.get("work_status") == "completed" else "editing",
             "sort_order": int(b.get("sort_order") or day),
             "updated_at": ts(),
         }
@@ -1330,7 +1339,7 @@ audio{width:260px;height:34px}
       <span class="muted" id="lessonMeta"></span>
     </div>
     <div class="card"><table>
-      <thead><tr><th>DAY</th><th>제목</th><th>예약 일시</th><th>상태</th><th>MP3</th><th>작업</th></tr></thead>
+      <thead><tr><th>DAY</th><th>제목</th><th>작업 상태</th><th>예약 일시</th><th>발송 상태</th><th>MP3</th><th>관리</th></tr></thead>
       <tbody id="lessonRows"></tbody>
     </table></div>
   </section>
@@ -1374,11 +1383,17 @@ audio{width:260px;height:34px}
     <label>DAY 번호<input type="number" id="f-day" min="1"></label>
     <label>정렬 순서<input type="number" id="f-order" min="0"></label>
     <label>예약 일시 (KST)<input type="datetime-local" id="f-sched"></label>
-    <label>상태
+    <label>발송 상태
       <select id="f-status">
         <option value="draft">초안</option>
         <option value="scheduled">예약</option>
         <option value="sent">발송됨</option>
+      </select>
+    </label>
+    <label>작업 상태
+      <select id="f-work">
+        <option value="editing">편집 중</option>
+        <option value="completed">완료</option>
       </select>
     </label>
     <label class="full">제목 (한국어)<input type="text" id="f-title"></label>
@@ -1396,8 +1411,7 @@ audio{width:260px;height:34px}
     <button class="b" onclick="preview()">텔레그램 미리보기</button>
     <button class="b" onclick="sendLesson('test')">테스트 발송</button>
     <div class="right">
-      <button class="b" onclick="closeEditor()">닫기</button>
-      <button class="b p" onclick="sendLesson('all')">지금 전체 발송</button>
+      <button class="b p" onclick="closeEditor()">닫기</button>
     </div>
   </div>
 </div></div>
@@ -1480,6 +1494,8 @@ function loadLessons(){
       tr.innerHTML =
         "<td><b>DAY "+L.day+"</b></td>"+
         "<td>"+esc(L.title||"-")+"<div class=muted>"+esc(L.title_ru||"")+"</div></td>"+
+        "<td><span class='badge "+(L.work_status==="completed"?"b-premium":"b-scheduled")+"'>"+
+          (L.work_status==="completed"?"완료":"편집 중")+"</span></td>"+
         "<td>"+(L.scheduled_at? esc(L.scheduled_at) : "<span class=muted>-</span>")+"</td>"+
         "<td><span class='badge b-"+L.status+"'>"+statusLabel(L.status)+"</span></td>"+
         "<td>"+(L.audio? "O" : "<span class=muted>-</span>")+"</td>"+
@@ -1627,13 +1643,14 @@ function loadSends(){
 function openEditor(id){
   CUR = id ? LESSONS.filter(function(L){return L.id===id;})[0] : null;
   var L = CUR || {day:"", title:"", title_ru:"", body:"", review:"", link:"",
-                  scheduled_at:"", status:"draft", sort_order:""};
+                  scheduled_at:"", status:"draft", work_status:"editing", sort_order:""};
   document.getElementById("edTitle").textContent = CUR ? ("DAY "+L.day+" 편집") : "새 레슨";
   document.getElementById("f-id").value = CUR ? L.id : "";
   document.getElementById("f-day").value = L.day || "";
   document.getElementById("f-order").value = L.sort_order || L.day || "";
   document.getElementById("f-sched").value = (L.scheduled_at||"").replace(" ","T").slice(0,16);
   document.getElementById("f-status").value = L.status || "draft";
+  document.getElementById("f-work").value = L.work_status || "editing";
   document.getElementById("f-title").value = L.title || "";
   document.getElementById("f-titleru").value = L.title_ru || "";
   document.getElementById("f-link").value = L.link || "";
@@ -1679,6 +1696,7 @@ function collect(status){
     sort_order: document.getElementById("f-order").value,
     scheduled_at: document.getElementById("f-sched").value,
     status: status || document.getElementById("f-status").value,
+    work_status: document.getElementById("f-work").value,
     title: document.getElementById("f-title").value,
     title_ru: document.getElementById("f-titleru").value,
     link: document.getElementById("f-link").value,
