@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS lessons (
     sent_body    TEXT DEFAULT '',
     work_status  TEXT DEFAULT 'editing',
     quiz         TEXT DEFAULT '',
+    quiz_today   TEXT DEFAULT '',
     summary      TEXT DEFAULT '',
     homework     TEXT DEFAULT '',
     updated_at   TEXT DEFAULT ''
@@ -172,7 +173,7 @@ def ensure_columns(conn):
         conn.execute("ALTER TABLE lessons ADD COLUMN quiz TEXT DEFAULT ''")
         conn.commit()
         log.info("lessons 테이블에 quiz 컬럼을 추가했습니다.")
-    for extra in ("summary", "homework"):
+    for extra in ("summary", "homework", "quiz_today"):
         if extra not in lcols:
             conn.execute("ALTER TABLE lessons ADD COLUMN " + extra + " TEXT DEFAULT ''")
             conn.commit()
@@ -899,6 +900,14 @@ ANSWER_KEYS = {
 }
 
 
+def lesson_quiz_today(lesson):
+    try:
+        v = json.loads(lesson.get("quiz_today") or "[]")
+        return v if isinstance(v, list) else []
+    except Exception:
+        return []
+
+
 def lesson_quiz(lesson):
     try:
         v = json.loads(lesson.get("quiz") or "[]")
@@ -1118,6 +1127,28 @@ function check(){
 </script>"""
 
 
+REVIEW_JS2 = """<script>
+var ANS2 = __ANS2__;
+function checkToday(){
+  var right = 0;
+  for (var i = 0; i < ANS2.length; i++) {
+    var box = document.getElementById("t" + i);
+    var labs = box.querySelectorAll("label.ch");
+    for (var k = 0; k < labs.length; k++) { labs[k].className = "ch"; }
+    labs[ANS2[i] - 1].className = "ch ok";
+    var sel = document.querySelector("input[name=t" + i + "]:checked");
+    if (sel) {
+      var v = parseInt(sel.value, 10);
+      if (v === ANS2[i]) { right++; }
+      else { labs[v - 1].className = "ch no"; }
+    }
+  }
+  document.getElementById("res2").textContent =
+    "\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442: " + right + " / " + ANS2.length;
+}
+</script>"""
+
+
 def render_review_page(lesson, quiz):
     """복습 자료 + 오디오 + 테스트를 하나의 공개 페이지로 만든다."""
     day = str(lesson.get("day") or "")
@@ -1152,6 +1183,21 @@ def render_review_page(lesson, quiz):
             links.append("<a href='/media/" + html.escape(nm) + "'>" + html.escape(nm) + "</a>")
         p.append("<div class=card><h2>Файлы</h2>"
                  + "<br>".join(links) + "</div>")
+    today_quiz = lesson_quiz_today(lesson)
+    if today_quiz:
+        p.append("<div class=card><h2>Тест — сегодняшний урок</h2>")
+        for i, it in enumerate(today_quiz):
+            p.append("<div class=q id=t" + str(i) + "><div class=qt>"
+                     + str(i + 1) + ". " + html.escape(it.get("q") or "") + "</div>")
+            for k, ch in enumerate(it.get("choices") or []):
+                p.append("<label class=ch><input type=radio name=t" + str(i)
+                         + " value=" + str(k + 1) + ">" + html.escape(ch) + "</label>")
+            p.append("</div>")
+        p.append("</div>")
+        p.append("<button class=go onclick='checkToday()'>Проверить</button>")
+        p.append("<div id=res2></div>")
+        p.append(REVIEW_JS2.replace("__ANS2__",
+                 json.dumps([int(it.get("answer") or 1) for it in today_quiz])))
     material = lesson.get("review") or ""
     if quiz:
         material = split_review(material)[0]
@@ -1487,6 +1533,7 @@ class Admin(BaseHTTPRequestHandler):
                       (STATUS_DRAFT, STATUS_SCHEDULED, STATUS_SENT) else STATUS_DRAFT,
             "work_status": "completed" if b.get("work_status") == "completed" else "editing",
             "quiz": json.dumps(parse_quiz_text(b.get("quiz_text") or ""), ensure_ascii=False),
+            "quiz_today": json.dumps(parse_quiz_text(b.get("quiz_today_text") or ""), ensure_ascii=False),
             "summary": b.get("summary", ""),
             "homework": b.get("homework", ""),
             "sort_order": int(b.get("sort_order") or day),
@@ -1641,6 +1688,7 @@ class Admin(BaseHTTPRequestHandler):
             "review": material,
             "audio": (PUBLIC_URL + "/media/" + audio) if audio else "",
             "quiz": quiz,
+            "quiz_today": lesson_quiz_today(lesson),
         })
 
     def _review_page(self, q):
@@ -1840,7 +1888,9 @@ audio{width:260px;height:34px}
       <textarea id="f-homework"></textarea></label>
     <label class="full">4. 어제 복습 자료 — Повторение вчерашнего урока
       <textarea id="f-review"></textarea></label>
-    <label class="full">테스트 문제 — 한 줄에 하나: 문제 | 보기1 | 보기2 | 보기3 | 보기4 | 정답번호
+    <label class="full">당일 복습 테스트 — 오늘 배운 내용 (한 줄에 하나: 문제 | 보기1 | 보기2 | 보기3 | 보기4 | 정답번호)
+      <textarea id="f-quiz-today"></textarea></label>
+    <label class="full">어제 복습 테스트 — 전날 배운 내용 (한 줄에 하나: 문제 | 보기1 | 보기2 | 보기3 | 보기4 | 정답번호)
       <textarea id="f-quiz" placeholder="안녕하세요 | Спасибо | Здравствуйте | Извините | Нет | 2"></textarea></label>
   </div>
   <div id="mediaBox" class="muted"></div>
@@ -2144,6 +2194,7 @@ function openEditor(id){
   document.getElementById("f-body").value = L.body || "";
   document.getElementById("f-review").value = L.review || "";
   document.getElementById("f-quiz").value = quizToText(L.quiz);
+  document.getElementById("f-quiz-today").value = quizToText(L.quiz_today);
   document.getElementById("f-summary").value = L.summary || "";
   document.getElementById("f-homework").value = L.homework || "";
   renderMedia();
@@ -2194,7 +2245,8 @@ function collect(status){
     review: document.getElementById("f-review").value,
     summary: document.getElementById("f-summary").value,
     homework: document.getElementById("f-homework").value,
-    quiz_text: document.getElementById("f-quiz").value
+    quiz_text: document.getElementById("f-quiz").value,
+    quiz_today_text: document.getElementById("f-quiz-today").value
   };
 }
 
