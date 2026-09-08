@@ -1379,6 +1379,16 @@ pre.prev{white-space:pre-wrap;word-break:break-word;background:#0d0f14;border:1p
 .toast.on{opacity:1}
 .hidden{display:none}
 audio{width:260px;height:34px}
+.wk{border:1px solid var(--line);border-radius:12px;margin-bottom:10px;overflow:hidden;background:#0d0f14}
+.wk-h{width:100%;display:flex;align-items:center;gap:10px;padding:13px 16px;background:transparent;border:0;color:inherit;font:inherit;font-size:15px;cursor:pointer;text-align:left}
+.wk-h:hover{background:#141821}
+.wk-ar{width:14px;display:inline-block;color:#8a93a6}
+.wk-n{margin-left:auto;font-size:12px;color:#8a93a6}
+.wk-b{border-top:1px solid var(--line)}
+.dr{display:grid;grid-template-columns:78px 1fr 84px 128px 88px 68px auto;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);cursor:pointer}
+.dr:last-child{border-bottom:0}
+.dr:hover{background:#141821}
+.dr-d{font-weight:600}
 </style></head><body>
 <div class="wrap">
   <header>
@@ -1396,10 +1406,7 @@ audio{width:260px;height:34px}
       <button class="b p" onclick="openEditor(null)">+ 새 레슨</button>
       <span class="muted" id="lessonMeta"></span>
     </div>
-    <div class="card"><table>
-      <thead><tr><th>DAY</th><th>제목</th><th>작업 상태</th><th>예약 일시</th><th>발송 상태</th><th>MP3</th><th>관리</th></tr></thead>
-      <tbody id="lessonRows"></tbody>
-    </table></div>
+    <div id="lessonWeeks"></div>
   </section>
 
   <section id="p-users" class="hidden">
@@ -1541,29 +1548,65 @@ function closeModal(id){ document.getElementById(id).classList.remove("on"); }
 function closeEditor(){ closeModal("editor"); loadLessons(); }
 function statusLabel(s){ return s==="sent"?"발송됨":(s==="scheduled"?"예약":"초안"); }
 
-function loadLessons(){
-  return fetch("/api/lessons").then(function(r){return r.json();}).then(function(d){
-    LESSONS = d.lessons || [];
-    var draft=0, sch=0, sent=0;
-    var tb = document.getElementById("lessonRows"); tb.innerHTML="";
-    LESSONS.forEach(function(L){
-      if(L.status==="scheduled") sch++; else if(L.status==="sent") sent++; else draft++;
-      var tr=document.createElement("tr");
-      tr.innerHTML =
-        "<td><b>DAY "+L.day+"</b></td>"+
-        "<td>"+esc(L.title||"-")+"<div class=muted>"+esc(L.title_ru||"")+"</div></td>"+
-        "<td><span class='badge "+(L.work_status==="completed"?"b-premium":"b-scheduled")+"'>"+
-          (L.work_status==="completed"?"완료":"편집 중")+"</span></td>"+
-        "<td>"+(L.scheduled_at? esc(L.scheduled_at) : "<span class=muted>-</span>")+"</td>"+
-        "<td><span class='badge b-"+L.status+"'>"+statusLabel(L.status)+"</span></td>"+
-        "<td>"+(L.audio? "O" : "<span class=muted>-</span>")+"</td>"+
-        "<td><div class=row>"+
-          "<button class=b data-act=edit data-id="+L.id+">편집</button>"+
-          "<button class=b data-act=dup data-id="+L.id+">복제</button>"+
-          "<button class='b d' data-act=del data-id="+L.id+">삭제</button>"+
-        "</div></td>";
-      tb.appendChild(tr);
+var WEEKOPEN = {};
+function weekOf(day){ return Math.floor((day-1)/7)+1; }
+function toggleWeek(w){ WEEKOPEN[w] = !WEEKOPEN[w]; renderWeeks(); }
+function renderWeeks(){
+  var host = document.getElementById("lessonWeeks");
+  if(!host) return;
+  var groups = {};
+  LESSONS.slice().sort(function(a,b){ return (a.day||0)-(b.day||0); }).forEach(function(L){
+    var w = weekOf(L.day||1);
+    if(!groups[w]) groups[w] = [];
+    groups[w].push(L);
+  });
+  var ws = Object.keys(groups).map(Number).sort(function(a,b){ return a-b; });
+  var html = "";
+  ws.forEach(function(w){
+    var items = groups[w];
+    var from = (w-1)*7+1;
+    var to = w*7;
+    var last = items[items.length-1].day;
+    if(last < to) to = last;
+    var done = 0;
+    items.forEach(function(L){ if(L.work_status==="completed") done++; });
+    var open = !!WEEKOPEN[w];
+    html += "<div class=wk>";
+    html += "<button class=wk-h onclick=toggleWeek(" + w + ")>"
+          + "<span class=wk-ar>" + (open ? "\u25BC" : "\u25B6") + "</span>"
+          + "<b>Week " + w + "</b>"
+          + "<span class=muted> \u00b7 DAY " + from + " ~ DAY " + to + "</span>"
+          + "<span class=wk-n>" + done + " / " + items.length + " 완료</span></button>";
+    html += "<div class='wk-b" + (open ? "" : " hidden") + "'>";
+    items.forEach(function(L){
+      html += "<div class=dr data-act=edit data-id=" + L.id + ">"
+        + "<div class=dr-d>DAY " + L.day + "</div>"
+        + "<div>" + esc(L.title||"-") + "<div class=muted>" + esc(L.title_ru||"") + "</div></div>"
+        + "<div><span class='badge " + (L.work_status==="completed" ? "b-premium" : "b-scheduled") + "'>"
+        + (L.work_status==="completed" ? "완료" : "편집 중") + "</span></div>"
+        + "<div class=muted>" + (L.scheduled_at ? esc(L.scheduled_at) : "-") + "</div>"
+        + "<div><span class='badge b-" + L.status + "'>" + statusLabel(L.status) + "</span></div>"
+        + "<div class=muted>" + (L.audio ? "MP3" : "-") + "</div>"
+        + "<div class=row>"
+        + "<button class=b data-act=edit data-id=" + L.id + ">편집</button>"
+        + "<button class=b data-act=dup data-id=" + L.id + ">복제</button>"
+        + "<button class='b d' data-act=del data-id=" + L.id + ">삭제</button>"
+        + "</div></div>";
     });
+    html += "</div></div>";
+  });
+  host.innerHTML = html || "<div class=muted>레슨이 없습니다.</div>";
+}
+function loadLessons(){
+  return fetch("/api/lessons").then(function(r){ return r.json(); }).then(function(d){
+    LESSONS = d.lessons || [];
+    var draft = 0, sch = 0, sent = 0;
+    LESSONS.forEach(function(L){
+      if(L.status==="scheduled") sch++;
+      else if(L.status==="sent") sent++;
+      else draft++;
+    });
+    renderWeeks();
     document.getElementById("lessonMeta").textContent =
       "전체 "+LESSONS.length+"개 · 초안 "+draft+" · 예약 "+sch+" · 발송됨 "+sent+
       " · 무료 공개 DAY 1~"+d.free_days;
