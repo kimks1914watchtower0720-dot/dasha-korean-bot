@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS lessons (
     sent_at      TEXT DEFAULT '',
     sent_body    TEXT DEFAULT '',
     work_status  TEXT DEFAULT 'editing',
+    quiz         TEXT DEFAULT '',
     updated_at   TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS users (
@@ -165,6 +166,10 @@ def ensure_columns(conn):
         conn.execute("UPDATE lessons SET work_status='editing' WHERE COALESCE(work_status,'')=''")
         conn.commit()
         log.info("lessons 테이블에 work_status 컬럼을 추가했습니다.")
+    if "quiz" not in lcols:
+        conn.execute("ALTER TABLE lessons ADD COLUMN quiz TEXT DEFAULT ''")
+        conn.commit()
+        log.info("lessons 테이블에 quiz 컬럼을 추가했습니다.")
 
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
     added2 = False
@@ -194,6 +199,7 @@ def init_db():
         conn.commit()
         ensure_columns(conn)
         migrate_legacy(conn)
+        migrate_reviews(conn)
         conn.close()
 
 
@@ -453,12 +459,12 @@ def tg_api_file(method, fields, filename, filedata, field_name="audio"):
         raise TelegramError(str(e))
 
 
-def tg_text(chat_id, text):
-    return tg_api(
-        "sendMessage",
-        {"chat_id": str(chat_id), "text": text, "parse_mode": "HTML",
-         "disable_web_page_preview": "true"},
-    )
+def tg_text(chat_id, text, buttons=None):
+    payload = {"chat_id": str(chat_id), "text": text, "parse_mode": "HTML",
+               "disable_web_page_preview": "true"}
+    if buttons:
+        payload["reply_markup"] = json.dumps(buttons, ensure_ascii=False)
+    return tg_api("sendMessage", payload)
 
 
 def tg_audio(chat_id, path, caption=""):
@@ -530,21 +536,7 @@ def payment_text():
 def send_lesson_to(chat_id, lesson, kind="auto", include_media=True):
     """레슨 한 건을 한 사람에게 보낸다. 실패하면 sends 에 기록하고 예외를 올린다."""
     try:
-        tg_text(chat_id, render_lesson(lesson))
-        if lesson.get("review"):
-            tg_text(chat_id, lesson["review"])
-        if include_media and lesson.get("audio"):
-            p = MEDIA_DIR / lesson["audio"]
-            if p.exists():
-                cap = "DAY " + str(lesson.get("day"))
-                if lesson.get("title"):
-                    cap += " \u00b7 " + lesson["title"]
-                tg_audio(chat_id, p, cap)
-        if include_media:
-            for name in lesson.get("files") or []:
-                p = MEDIA_DIR / name
-                if p.exists():
-                    tg_document(chat_id, p)
+        tg_text(chat_id, render_lesson(lesson), buttons=review_buttons(lesson))
         log_send(lesson, chat_id, "ok", "", kind)
         return True, ""
     except Exception as e:
@@ -873,6 +865,221 @@ background:var(--acc);color:#fff;font-size:15px;cursor:pointer}
 </body></html>"""
 
 
+def _public_url():
+    v = os.environ.get("PUBLIC_URL", "").strip()
+    if not v:
+        d = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
+        if d:
+            v = "https://" + d
+    if not v:
+        v = "https://dasha-korean-bot-production.up.railway.app"
+    return v.rstrip("/")
+
+
+PUBLIC_URL = _public_url()
+
+# 기존 텔레그램 복습 테스트의 정답 (DAY 별, 문항 순서대로). 내용은 그대로 보존한다.
+ANSWER_KEYS = {
+    2: "2222214222", 3: "2132232122", 4: "2134223132", 5: "2132222422",
+    6: "2221223222", 7: "2132213122", 8: "2122211221", 9: "1223121121",
+    10: "2121222111", 11: "2134221232", 12: "2134222222", 13: "2134212112",
+    14: "2313122123", 15: "1222122121", 16: "2111122122", 17: "2212323322",
+    18: "2121123232", 19: "1231212212", 20: "2132422222", 21: "2221111211",
+    22: "2321232122", 23: "2121311112", 24: "2221111222", 25: "1231211121",
+    26: "1121212232", 27: "2221112211", 28: "2121111111",
+}
+
+
+def lesson_quiz(lesson):
+    try:
+        v = json.loads(lesson.get("quiz") or "[]")
+        return v if isinstance(v, list) else []
+    except Exception:
+        return []
+
+
+def parse_quiz_text(text):
+    """관리자 입력(한 줄 = 문제 | 보기1 | 보기2 | ... | 정답번호) 을 목록으로."""
+    out = []
+    for line in (text or "").split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 4:
+            continue
+        try:
+            ans = int(parts[-1])
+        except Exception:
+            ans = 1
+        choices = [p for p in parts[1:-1] if p]
+        if not choices:
+            continue
+        if ans < 1 or ans > len(choices):
+            ans = 1
+        out.append({"q": parts[0], "choices": choices, "answer": ans})
+    return out
+
+
+def split_review(text):
+    """기존 복습 자료에서 테스트 문항을 분리한다. (자료, 문항목록)"""
+    text = text or ""
+    idx = text.find("\U0001F4DD")
+    if idx < 0:
+        return text.strip(), []
+    material = text[:idx].strip()
+    items = []
+    for line in text[idx:].split("\n"):
+        line = line.strip()
+        m = re.match(r"^\d+\.\s*(.+)$", line)
+        if not m:
+            continue
+        chunks = re.split("[\u2460\u2461\u2462\u2463\u2464]", m.group(1))
+        q = chunks[0].strip()
+        choices = [c.strip() for c in chunks[1:] if c.strip()]
+        if not choices:
+            continue
+        items.append({"q": q, "choices": choices, "answer": 1})
+    return material, items
+
+
+def migrate_reviews(conn):
+    """복습 자료 안에 섞여 있던 테스트를 quiz 컬럼으로 옮긴다 (한 번만). 내용은 그대로."""
+    try:
+        rows = conn.execute("SELECT id, day, review, quiz FROM lessons").fetchall()
+    except Exception:
+        return
+    n = 0
+    for r in rows:
+        if (r["quiz"] or "").strip():
+            continue
+        material, items = split_review(r["review"] or "")
+        if not items:
+            continue
+        key = ANSWER_KEYS.get(int(r["day"] or 0), "")
+        for i, it in enumerate(items):
+            if i < len(key):
+                a = int(key[i])
+                if 1 <= a <= len(it["choices"]):
+                    it["answer"] = a
+        conn.execute("UPDATE lessons SET review=?, quiz=? WHERE id=?",
+                     (material, json.dumps(items, ensure_ascii=False), r["id"]))
+        n += 1
+    if n:
+        conn.commit()
+        log.info("복습 테스트 %d개를 웹 페이지용으로 구조화했습니다.", n)
+
+
+def review_url(lesson):
+    return PUBLIC_URL + "/review?day=" + str(lesson.get("day") or 0)
+
+
+def review_buttons(lesson):
+    """복습 자료나 테스트가 있으면 웹 페이지로 가는 버튼을 붙인다."""
+    if not (lesson.get("review") or lesson.get("audio") or lesson_quiz(lesson)):
+        return None
+    return {"inline_keyboard": [[{
+        "text": "\U0001F4DA \u041f\u043e\u0432\u0442\u043e\u0440\u0435\u043d\u0438\u0435 \u0438 \u0442\u0435\u0441\u0442",
+        "url": review_url(lesson)}]]}
+
+
+REVIEW_CSS = """
+:root{--bg:#0b0d12;--card:#11141b;--line:#232838;--fg:#e8ecf5;--muted:#8a93a6;--acc:#4c8dff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);line-height:1.65;
+  font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:760px;margin:0 auto;padding:26px 16px 64px}
+h1{font-size:21px;margin:0 0 4px}
+.sub{color:var(--muted);margin:0 0 22px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:14px}
+.card h2{font-size:13px;margin:0 0 12px;color:var(--muted);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+pre{white-space:pre-wrap;word-break:break-word;margin:0;font:inherit}
+audio{width:100%}
+.q{border-top:1px solid var(--line);padding:15px 0}
+.q:first-of-type{border-top:0;padding-top:0}
+.qt{font-weight:600;margin-bottom:9px}
+label.ch{display:block;padding:8px 11px;border:1px solid var(--line);border-radius:9px;margin-bottom:6px;cursor:pointer}
+label.ch:hover{background:#171b24}
+label.ch input{margin-right:9px}
+label.ok{border-color:#2f7d4f;background:#132018}
+label.no{border-color:#8d3b3b;background:#201414}
+button.go{width:100%;padding:13px;border:0;border-radius:11px;background:var(--acc);color:#fff;font-size:15px;font-weight:600;cursor:pointer}
+#res{margin-top:14px;text-align:center;font-size:17px;font-weight:600}
+a{color:var(--acc)}
+"""
+
+REVIEW_JS = """<script>
+var ANS = __ANS__;
+function check(){
+  var right = 0;
+  for (var i = 0; i < ANS.length; i++) {
+    var box = document.getElementById("q" + i);
+    var labs = box.querySelectorAll("label.ch");
+    for (var k = 0; k < labs.length; k++) { labs[k].className = "ch"; }
+    labs[ANS[i] - 1].className = "ch ok";
+    var sel = document.querySelector("input[name=q" + i + "]:checked");
+    if (sel) {
+      var v = parseInt(sel.value, 10);
+      if (v === ANS[i]) { right++; }
+      else { labs[v - 1].className = "ch no"; }
+    }
+  }
+  document.getElementById("res").textContent =
+    "\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442: " + right + " / " + ANS.length;
+}
+</script>"""
+
+
+def render_review_page(lesson, quiz):
+    """복습 자료 + 오디오 + 테스트를 하나의 공개 페이지로 만든다."""
+    day = str(lesson.get("day") or "")
+    title = lesson.get("title") or ""
+    title_ru = lesson.get("title_ru") or ""
+    p = []
+    p.append("<!doctype html><html lang=ru><head><meta charset=utf-8>")
+    p.append("<meta name=viewport content='width=device-width,initial-scale=1'>")
+    p.append("<meta name=robots content=noindex>")
+    p.append("<title>DAY " + day + "</title>")
+    p.append("<style>" + REVIEW_CSS + "</style></head><body><div class=wrap>")
+    head = "DAY " + day
+    if title:
+        head += " &middot; " + html.escape(title)
+    p.append("<h1>" + head + "</h1>")
+    if title_ru:
+        p.append("<p class=sub>" + html.escape(title_ru) + "</p>")
+    if lesson.get("review"):
+        p.append("<div class=card><h2>\u041c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u044b</h2><pre>"
+                 + html.escape(lesson["review"]) + "</pre></div>")
+    if lesson.get("audio"):
+        p.append("<div class=card><h2>\u0410\u0443\u0434\u0438\u043e</h2>"
+                 + "<audio controls preload=none src='/media/"
+                 + html.escape(lesson["audio"]) + "'></audio></div>")
+    files = lesson.get("files") or []
+    if files:
+        links = []
+        for nm in files:
+            links.append("<a href='/media/" + html.escape(nm) + "'>" + html.escape(nm) + "</a>")
+        p.append("<div class=card><h2>\u0424\u0430\u0439\u043b\u044b</h2>"
+                 + "<br>".join(links) + "</div>")
+    if quiz:
+        p.append("<div class=card><h2>\u0422\u0435\u0441\u0442</h2>")
+        for i, it in enumerate(quiz):
+            p.append("<div class=q id=q" + str(i) + "><div class=qt>"
+                     + str(i + 1) + ". " + html.escape(it.get("q") or "") + "</div>")
+            for k, ch in enumerate(it.get("choices") or []):
+                p.append("<label class=ch><input type=radio name=q" + str(i)
+                         + " value=" + str(k + 1) + ">" + html.escape(ch) + "</label>")
+            p.append("</div>")
+        p.append("</div>")
+        p.append("<button class=go onclick='check()'>"
+                 + "\u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c</button>")
+        p.append("<div id=res></div>")
+        ans = [int(it.get("answer") or 1) for it in quiz]
+        p.append(REVIEW_JS.replace("__ANS__", json.dumps(ans)))
+    p.append("</div></body></html>")
+    return "\n".join(p)
+
+
 def parse_multipart(body, content_type):
     """multipart/form-data 최소 파서. {name: (filename, bytes)} 와 {name: str} 을 돌려준다."""
     m = re.search(r"boundary=([^;]+)", content_type or "")
@@ -1002,6 +1209,16 @@ class Admin(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if path == "/review":
+            return self._review_page(q)
+        if path.startswith("/media/"):
+            name = os.path.basename(path[len("/media/"):])
+            p = MEDIA_DIR / name
+            if not p.exists():
+                return self._bytes(404, b"not found", "text/plain")
+            ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+            return self._bytes(200, p.read_bytes(), ctype)
+
         ok, why = self._auth()
         if not ok:
             return self._login_page(why)
@@ -1170,6 +1387,7 @@ class Admin(BaseHTTPRequestHandler):
             "status": b.get("status") if b.get("status") in
                       (STATUS_DRAFT, STATUS_SCHEDULED, STATUS_SENT) else STATUS_DRAFT,
             "work_status": "completed" if b.get("work_status") == "completed" else "editing",
+            "quiz": json.dumps(parse_quiz_text(b.get("quiz_text") or ""), ensure_ascii=False),
             "sort_order": int(b.get("sort_order") or day),
             "updated_at": ts(),
         }
@@ -1289,6 +1507,21 @@ class Admin(BaseHTTPRequestHandler):
         except Exception:
             pass
         return self._json(200, {"ok": True, "lesson": get_lesson(lesson["id"])})
+
+    def _review_page(self, q):
+        """학생용 공개 페이지 — 복습 자료 + 오디오 + 테스트"""
+        try:
+            day = int((q.get("day") or ["0"])[0])
+        except Exception:
+            day = 0
+        lesson = get_lesson_by_day(day)
+        if not lesson:
+            body = ("<!doctype html><meta charset=utf-8><style>" + REVIEW_CSS
+                    + "</style><div class=wrap><h1>DAY " + str(day) + "</h1>"
+                    + "<p class=sub>\u0423\u0440\u043e\u043a \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d</p></div>")
+            return self._bytes(404, body.encode("utf-8"), "text/html; charset=utf-8")
+        page = render_review_page(lesson, lesson_quiz(lesson))
+        return self._bytes(200, page.encode("utf-8"), "text/html; charset=utf-8")
 
     def _upload(self, raw, ctype):
         fields, files = parse_multipart(raw, ctype)
@@ -1466,8 +1699,10 @@ audio{width:260px;height:34px}
     <label class="full">숙제/자료 링크<input type="text" id="f-link" placeholder="https://..."></label>
     <label class="full">본문 — 텔레그램으로 나가는 메시지 (HTML 태그 b, i, a 사용 가능)
       <textarea id="f-body"></textarea></label>
-    <label class="full">복습 자료 — 본문 뒤에 별도 메시지로 발송 (비우면 안 보냄)
+    <label class="full">복습 자료 — 웹 복습·테스트 페이지에 표시 (텔레그램으로는 버튼만 나감)
       <textarea id="f-review"></textarea></label>
+    <label class="full">테스트 문제 — 한 줄에 하나: 문제 | 보기1 | 보기2 | 보기3 | 보기4 | 정답번호
+      <textarea id="f-quiz" placeholder="안녕하세요 | Спасибо | Здравствуйте | Извините | Нет | 2"></textarea></label>
   </div>
   <div id="mediaBox" class="muted"></div>
   <div class="foot">
@@ -1741,6 +1976,18 @@ function loadSends(){
   });
 }
 
+function quizToText(q){
+  var arr = [];
+  try { arr = JSON.parse(q || "[]"); } catch(e) { arr = []; }
+  if (!arr || !arr.length) return "";
+  var out = [];
+  for (var i = 0; i < arr.length; i++) {
+    var it = arr[i] || {};
+    out.push([it.q || ""].concat(it.choices || []).concat([String(it.answer || 1)]).join(" | "));
+  }
+  return out.join("\n");
+}
+
 function openEditor(id){
   CUR = id ? LESSONS.filter(function(L){return L.id===id;})[0] : null;
   var L = CUR || {day:"", title:"", title_ru:"", body:"", review:"", link:"",
@@ -1757,6 +2004,7 @@ function openEditor(id){
   document.getElementById("f-link").value = L.link || "";
   document.getElementById("f-body").value = L.body || "";
   document.getElementById("f-review").value = L.review || "";
+  document.getElementById("f-quiz").value = quizToText(L.quiz);
   renderMedia();
   document.getElementById("editor").classList.add("on");
 }
@@ -1802,7 +2050,8 @@ function collect(status){
     title_ru: document.getElementById("f-titleru").value,
     link: document.getElementById("f-link").value,
     body: document.getElementById("f-body").value,
-    review: document.getElementById("f-review").value
+    review: document.getElementById("f-review").value,
+    quiz_text: document.getElementById("f-quiz").value
   };
 }
 
