@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS lessons (
     sent_body    TEXT DEFAULT '',
     work_status  TEXT DEFAULT 'editing',
     quiz         TEXT DEFAULT '',
+    summary      TEXT DEFAULT '',
+    homework     TEXT DEFAULT '',
     updated_at   TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS users (
@@ -170,6 +172,11 @@ def ensure_columns(conn):
         conn.execute("ALTER TABLE lessons ADD COLUMN quiz TEXT DEFAULT ''")
         conn.commit()
         log.info("lessons 테이블에 quiz 컬럼을 추가했습니다.")
+    for extra in ("summary", "homework"):
+        if extra not in lcols:
+            conn.execute("ALTER TABLE lessons ADD COLUMN " + extra + " TEXT DEFAULT ''")
+            conn.commit()
+            log.info("lessons 테이블에 %s 컬럼을 추가했습니다.", extra)
 
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
     added2 = False
@@ -1097,25 +1104,31 @@ def render_review_page(lesson, quiz):
     p.append("<h1>" + head + "</h1>")
     if title_ru:
         p.append("<p class=sub>" + html.escape(title_ru) + "</p>")
-    material = lesson.get("review") or ""
-    if quiz:
-        material = split_review(material)[0]
-    if material:
-        p.append("<div class=card><h2>\u041c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u044b</h2><pre>"
-                 + html.escape(material) + "</pre></div>")
     if lesson.get("audio"):
-        p.append("<div class=card><h2>\u0410\u0443\u0434\u0438\u043e</h2>"
+        p.append("<div class=card><h2>1. Аудио · произношение</h2>"
                  + "<audio controls preload=none src='/media/"
                  + html.escape(lesson["audio"]) + "'></audio></div>")
+    if lesson.get("summary"):
+        p.append("<div class=card><h2>2. Итоги урока</h2><pre>"
+                 + html.escape(lesson["summary"]) + "</pre></div>")
+    if lesson.get("homework"):
+        p.append("<div class=card><h2>3. Домашнее задание</h2><pre>"
+                 + html.escape(lesson["homework"]) + "</pre></div>")
     files = lesson.get("files") or []
     if files:
         links = []
         for nm in files:
             links.append("<a href='/media/" + html.escape(nm) + "'>" + html.escape(nm) + "</a>")
-        p.append("<div class=card><h2>\u0424\u0430\u0439\u043b\u044b</h2>"
+        p.append("<div class=card><h2>Файлы</h2>"
                  + "<br>".join(links) + "</div>")
+    material = lesson.get("review") or ""
     if quiz:
-        p.append("<div class=card><h2>\u0422\u0435\u0441\u0442</h2>")
+        material = split_review(material)[0]
+    if material:
+        p.append("<div class=card><h2>4. Повторение вчерашнего урока</h2><pre>"
+                 + html.escape(material) + "</pre></div>")
+    if quiz:
+        p.append("<div class=card><h2>Тест — повторение вчерашнего урока</h2>")
         for i, it in enumerate(quiz):
             p.append("<div class=q id=q" + str(i) + "><div class=qt>"
                      + str(i + 1) + ". " + html.escape(it.get("q") or "") + "</div>")
@@ -1443,6 +1456,8 @@ class Admin(BaseHTTPRequestHandler):
                       (STATUS_DRAFT, STATUS_SCHEDULED, STATUS_SENT) else STATUS_DRAFT,
             "work_status": "completed" if b.get("work_status") == "completed" else "editing",
             "quiz": json.dumps(parse_quiz_text(b.get("quiz_text") or ""), ensure_ascii=False),
+            "summary": b.get("summary", ""),
+            "homework": b.get("homework", ""),
             "sort_order": int(b.get("sort_order") or day),
             "updated_at": ts(),
         }
@@ -1590,6 +1605,8 @@ class Admin(BaseHTTPRequestHandler):
             "day": lesson.get("day"),
             "title": lesson.get("title") or "",
             "title_ru": lesson.get("title_ru") or "",
+            "summary": lesson.get("summary") or "",
+            "homework": lesson.get("homework") or "",
             "review": material,
             "audio": (PUBLIC_URL + "/media/" + audio) if audio else "",
             "quiz": quiz,
@@ -1786,7 +1803,11 @@ audio{width:260px;height:34px}
     <label class="full">숙제/자료 링크<input type="text" id="f-link" placeholder="https://..."></label>
     <label class="full">본문 — 텔레그램으로 나가는 메시지 (HTML 태그 b, i, a 사용 가능)
       <textarea id="f-body"></textarea></label>
-    <label class="full">복습 자료 — 웹 복습·테스트 페이지에 표시 (텔레그램으로는 버튼만 나감)
+    <label class="full">2. 수업 요약 — Итоги урока
+      <textarea id="f-summary"></textarea></label>
+    <label class="full">3. 숙제 — Домашнее задание
+      <textarea id="f-homework"></textarea></label>
+    <label class="full">4. 어제 복습 자료 — Повторение вчерашнего урока
       <textarea id="f-review"></textarea></label>
     <label class="full">테스트 문제 — 한 줄에 하나: 문제 | 보기1 | 보기2 | 보기3 | 보기4 | 정답번호
       <textarea id="f-quiz" placeholder="안녕하세요 | Спасибо | Здравствуйте | Извините | Нет | 2"></textarea></label>
@@ -2092,6 +2113,8 @@ function openEditor(id){
   document.getElementById("f-body").value = L.body || "";
   document.getElementById("f-review").value = L.review || "";
   document.getElementById("f-quiz").value = quizToText(L.quiz);
+  document.getElementById("f-summary").value = L.summary || "";
+  document.getElementById("f-homework").value = L.homework || "";
   renderMedia();
   document.getElementById("editor").classList.add("on");
 }
@@ -2138,6 +2161,8 @@ function collect(status){
     link: document.getElementById("f-link").value,
     body: document.getElementById("f-body").value,
     review: document.getElementById("f-review").value,
+    summary: document.getElementById("f-summary").value,
+    homework: document.getElementById("f-homework").value,
     quiz_text: document.getElementById("f-quiz").value
   };
 }
