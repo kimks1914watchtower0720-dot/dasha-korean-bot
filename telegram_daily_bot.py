@@ -200,6 +200,7 @@ def init_db():
         ensure_columns(conn)
         migrate_legacy(conn)
         migrate_reviews(conn)
+        restore_reviews(conn)
         conn.close()
 
 
@@ -970,7 +971,56 @@ def migrate_reviews(conn):
         log.info("복습 테스트 %d개를 웹 페이지용으로 구조화했습니다.", n)
 
 
+MARKS = "\u2460\u2461\u2462\u2463\u2464"
+TEST_HEADER = ("\U0001F4DD \u0422\u0435\u0441\u0442: \u043f\u043e\u0432\u0442\u043e\u0440\u0435\u043d\u0438\u0435"
+               " \u0432\u0447\u0435\u0440\u0430\u0448\u043d\u0435\u0433\u043e \u0443\u0440\u043e\u043a\u0430")
+
+
+def quiz_to_review_text(items):
+    """구조화된 문항을 원래 복습 자료에 있던 텍스트 형태로 되돌린다."""
+    lines = []
+    for i, it in enumerate(items or []):
+        s = str(i + 1) + ". " + (it.get("q") or "")
+        for k, ch in enumerate(it.get("choices") or []):
+            mark = MARKS[k] if k < len(MARKS) else "-"
+            s += " " + mark + " " + ch
+        lines.append(s)
+    return "\n".join(lines)
+
+
+def restore_reviews(conn):
+    """복습 자료 칸에서 사라진 테스트 문항을 원문 그대로 다시 채운다."""
+    try:
+        rows = conn.execute("SELECT id, review, quiz FROM lessons").fetchall()
+    except Exception:
+        return
+    n = 0
+    for r in rows:
+        raw = r["quiz"] or ""
+        if not raw.strip():
+            continue
+        review = r["review"] or ""
+        if "\U0001F4DD" in review:
+            continue
+        try:
+            items = json.loads(raw)
+        except Exception:
+            continue
+        if not items:
+            continue
+        text = (review.strip() + "\n\n" + TEST_HEADER + "\n\n"
+                + quiz_to_review_text(items)).strip()
+        conn.execute("UPDATE lessons SET review=? WHERE id=?", (text, r["id"]))
+        n += 1
+    if n:
+        conn.commit()
+        log.info("복습 자료 %d개의 테스트 문항을 복구했습니다.", n)
+
+
 def review_url(lesson):
+    link = (lesson.get("link") or "").strip()
+    if link:
+        return link
     return PUBLIC_URL + "/review?day=" + str(lesson.get("day") or 0)
 
 
@@ -1047,9 +1097,12 @@ def render_review_page(lesson, quiz):
     p.append("<h1>" + head + "</h1>")
     if title_ru:
         p.append("<p class=sub>" + html.escape(title_ru) + "</p>")
-    if lesson.get("review"):
+    material = lesson.get("review") or ""
+    if quiz:
+        material = split_review(material)[0]
+    if material:
         p.append("<div class=card><h2>\u041c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u044b</h2><pre>"
-                 + html.escape(lesson["review"]) + "</pre></div>")
+                 + html.escape(material) + "</pre></div>")
     if lesson.get("audio"):
         p.append("<div class=card><h2>\u0410\u0443\u0434\u0438\u043e</h2>"
                  + "<audio controls preload=none src='/media/"
@@ -1211,6 +1264,8 @@ class Admin(BaseHTTPRequestHandler):
             return
         if path == "/review":
             return self._review_page(q)
+        if path == "/api/public/lesson":
+            return self._public_lesson(q)
         if path.startswith("/media/"):
             name = os.path.basename(path[len("/media/"):])
             p = MEDIA_DIR / name
@@ -1507,6 +1562,38 @@ class Admin(BaseHTTPRequestHandler):
         except Exception:
             pass
         return self._json(200, {"ok": True, "lesson": get_lesson(lesson["id"])})
+
+    def _cors_json(self, code, obj):
+        data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _public_lesson(self, q):
+        """학생용 공개 데이터 (외부 사이트에서 사용). 로그인 불필요."""
+        try:
+            day = int((q.get("day") or ["0"])[0])
+        except Exception:
+            day = 0
+        lesson = get_lesson_by_day(day)
+        if not lesson:
+            return self._cors_json(404, {"error": "not found"})
+        quiz = lesson_quiz(lesson)
+        material = lesson.get("review") or ""
+        if quiz:
+            material = split_review(material)[0]
+        audio = lesson.get("audio") or ""
+        return self._cors_json(200, {
+            "day": lesson.get("day"),
+            "title": lesson.get("title") or "",
+            "title_ru": lesson.get("title_ru") or "",
+            "review": material,
+            "audio": (PUBLIC_URL + "/media/" + audio) if audio else "",
+            "quiz": quiz,
+        })
 
     def _review_page(self, q):
         """학생용 공개 페이지 — 복습 자료 + 오디오 + 테스트"""
@@ -1805,7 +1892,7 @@ function renderWeeks(){
     if(last < to) to = last;
     var done = 0;
     items.forEach(function(L){ if(L.work_status==="completed") done++; });
-    var open = !!WEEKOPEN[w];
+    var open = (WEEKOPEN[w] === undefined) ? true : !!WEEKOPEN[w];
     html += "<div class=wk>";
     html += "<button class=wk-h onclick=toggleWeek(" + w + ")>"
           + "<span class=wk-ar>" + (open ? "\u25BC" : "\u25B6") + "</span>"
