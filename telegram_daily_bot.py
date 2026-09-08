@@ -2072,7 +2072,7 @@ function quizToText(q){
     var it = arr[i] || {};
     out.push([it.q || ""].concat(it.choices || []).concat([String(it.answer || 1)]).join(" | "));
   }
-  return out.join("\n");
+  return out.join(String.fromCharCode(10));
 }
 
 function openEditor(id){
