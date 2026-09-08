@@ -627,6 +627,64 @@ async def scheduler_loop():
 # ---------- 텔레그램 봇 명령어 ----------
 
 
+SEND_HOUR = int(os.environ.get("SEND_HOUR", "11"))
+SEND_MINUTE = int(os.environ.get("SEND_MINUTE", "0"))
+DAILY_AUTO = os.environ.get("DAILY_AUTO", "1") != "0"
+
+
+def run_daily_batch():
+    """학생별 진도에 맞춰 다음 DAY 를 하루 한 번 보낸다. (발송, 잠금안내, 실패) 반환"""
+    today = now_kst().strftime("%Y-%m-%d")
+    sent = locked = fail = 0
+    for u in all_users(active_only=True):
+        if (u.get("last_sent") or "") == today:
+            continue
+        chat_id = u["chat_id"]
+        day = int(u.get("day") or 0)
+        nxt = day + 1 if day >= 1 else 1
+        lesson = get_lesson_by_day(nxt)
+        if not lesson:
+            continue
+        if is_locked(u, nxt):
+            try:
+                tg_text(chat_id, paywall_text())
+                upsert_user(chat_id, last_sent=today)
+                locked += 1
+            except Exception:
+                fail += 1
+            continue
+        good, _ = send_lesson_to(chat_id, lesson, "daily")
+        if good:
+            upsert_user(chat_id, day=nxt, last_sent=today)
+            sent += 1
+        else:
+            fail += 1
+    return sent, locked, fail
+
+
+async def daily_loop():
+    log.info("매일 자동 발송 루프 시작 (%02d:%02d KST)", SEND_HOUR, SEND_MINUTE)
+    while True:
+        try:
+            n = now_kst()
+            past = n.hour > SEND_HOUR or (n.hour == SEND_HOUR and n.minute >= SEND_MINUTE)
+            if DAILY_AUTO and past:
+                sent, locked, fail = await asyncio.to_thread(run_daily_batch)
+                if sent or locked or fail:
+                    log.info("자동 발송 — 발송 %d, 잠금안내 %d, 실패 %d", sent, locked, fail)
+                    if ADMIN_CHAT_ID:
+                        try:
+                            tg_text(ADMIN_CHAT_ID,
+                                    "\U0001F4E4 오늘의 자동 발송 완료\n발송 " + str(sent)
+                                    + " / 잠금안내 " + str(locked)
+                                    + " / 실패 " + str(fail))
+                        except Exception:
+                            pass
+        except Exception as e:
+            log.warning("자동 발송 루프 오류: %s", e)
+        await asyncio.sleep(60)
+
+
 def claim_course_start(chat_id):
     """코스 시작을 한 번만 허용한다. 처음 시작하는 경우에만 True 를 돌려준다.
 
@@ -1868,6 +1926,7 @@ def start_admin_server():
 
 async def _post_init(app):
     app.create_task(scheduler_loop())
+    app.create_task(daily_loop())
     log.info("봇 준비 완료")
 
 
