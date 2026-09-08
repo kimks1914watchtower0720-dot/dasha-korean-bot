@@ -208,6 +208,7 @@ def init_db():
         migrate_legacy(conn)
         migrate_reviews(conn)
         restore_reviews(conn)
+        import_legacy_audio(conn)
         conn.close()
 
 
@@ -1022,6 +1023,36 @@ def restore_reviews(conn):
     if n:
         conn.commit()
         log.info("복습 자료 %d개의 테스트 문항을 복구했습니다.", n)
+
+
+LEGACY_AUDIO = {
+    1: "https://boisterous-smakager-668cc1.netlify.app/day1-audio.mp3",
+    2: "https://boisterous-smakager-668cc1.netlify.app/day2-audio.mp3",
+}
+
+
+def import_legacy_audio(conn):
+    """학습 사이트에만 있던 음성 파일을 관리자 저장소로 한 번만 옮긴다."""
+    for day, url in LEGACY_AUDIO.items():
+        try:
+            row = conn.execute("SELECT id, audio FROM lessons WHERE day=?", (day,)).fetchone()
+        except Exception:
+            return
+        if not row or (row["audio"] or "").strip():
+            continue
+        name = "day" + str(day) + "-audio.mp3"
+        target = MEDIA_DIR / name
+        if not target.exists():
+            try:
+                with urllib.request.urlopen(url, timeout=60) as r:
+                    data = r.read()
+                target.write_bytes(data)
+            except Exception as e:
+                log.warning("기존 음성 가져오기 실패 day=%s: %s", day, e)
+                continue
+        conn.execute("UPDATE lessons SET audio=? WHERE id=?", (name, row["id"]))
+        conn.commit()
+        log.info("DAY %s 음성 파일을 관리자 저장소로 옮겼습니다.", day)
 
 
 def review_url(lesson):
