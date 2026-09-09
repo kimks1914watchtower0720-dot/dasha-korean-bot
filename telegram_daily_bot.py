@@ -349,6 +349,32 @@ def all_users(active_only=False):
     return [dict(r) for r in rows]
 
 
+def read_today_map():
+    """오늘 발송분에 대해서만 학생별 열람 여부를 계산한다. 과거 기록은 쓰지 않는다."""
+    today = now_kst().strftime("%Y-%m-%d")
+    out = {}
+    try:
+        conn = db()
+        rows = conn.execute(
+            "SELECT chat_id,"
+            " MAX(CASE WHEN COALESCE(opened_at,'')<>'' THEN 1 ELSE 0 END) opened"
+            " FROM sends WHERE status='ok' AND kind<>'test'"
+            " AND substr(created_at,1,10)=? GROUP BY chat_id", (today,)).fetchall()
+        conn.close()
+        for r in rows:
+            out[str(r["chat_id"])] = "read" if r["opened"] else "unread"
+    except Exception as e:
+        log.warning("열람 상태 조회 실패: %s", e)
+    return out
+
+
+def with_read_today(users):
+    m = read_today_map()
+    for u in users:
+        u["read_today"] = m.get(str(u.get("chat_id")), "none")
+    return users
+
+
 def delete_user(chat_id):
     """학생 한 명만 지운다. 레슨/음성 등 공용 자료는 건드리지 않는다."""
     chat_id = str(chat_id)
@@ -1384,17 +1410,7 @@ class Admin(BaseHTTPRequestHandler):
         if path == "/api/lessons":
             return self._json(200, {"lessons": all_lessons(), "free_days": FREE_DAYS})
         if path == "/api/users":
-            return self._json(200, {"users": all_users()})
-        if path == "/api/read-stats":
-            conn = db()
-            rows = conn.execute(
-                "SELECT day, COUNT(DISTINCT chat_id) sent,"
-                " COUNT(DISTINCT CASE WHEN COALESCE(opened_at,'')<>''"
-                " THEN chat_id END) opened"
-                " FROM sends WHERE status='ok' AND kind<>'test'"
-                " AND day IS NOT NULL GROUP BY day").fetchall()
-            conn.close()
-            return self._json(200, {"stats": [dict(r) for r in rows]})
+            return self._json(200, {"users": with_read_today(all_users())})
         if path == "/api/sends":
             conn = db()
             rows = conn.execute(
@@ -1848,7 +1864,7 @@ audio{width:260px;height:34px}
 .wk-ar{width:14px;display:inline-block;color:#8a93a6}
 .wk-n{margin-left:auto;font-size:12px;color:#8a93a6}
 .wk-b{border-top:1px solid var(--line)}
-.dr{display:grid;grid-template-columns:74px 1fr 80px 120px 84px 60px 118px auto;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);cursor:pointer}
+.dr{display:grid;grid-template-columns:78px 1fr 84px 128px 88px 68px auto;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);cursor:pointer}
 .dr:last-child{border-bottom:0}
 .dr:hover{background:#141821}
 .dr-d{font-weight:600}
@@ -1890,7 +1906,7 @@ audio{width:260px;height:34px}
       <span class="muted" id="userMeta"></span>
     </div>
     <div class="card"><table>
-      <thead><tr><th>ID</th><th>이름 / 아이디</th><th>등록일</th><th>시작일</th><th>시작 DAY</th><th>현재 DAY</th><th>상태</th><th>요금제</th><th>마지막 발송</th><th>작업</th></tr></thead>
+      <thead><tr><th>ID</th><th>이름 / 아이디</th><th>등록일</th><th>시작일</th><th>시작 DAY</th><th>현재 DAY</th><th>상태</th><th>요금제</th><th>오늘 열람</th><th>마지막 발송</th><th>작업</th></tr></thead>
       <tbody id="userRows"></tbody>
     </table></div>
   </section>
@@ -2020,15 +2036,6 @@ function closeEditor(){ closeModal("editor"); loadLessons(); }
 function statusLabel(s){ return s==="sent"?"발송됨":(s==="scheduled"?"예약":"초안"); }
 
 var WEEKOPEN = {};
-var READSTAT = {};
-function readCell(day){
-  var s = READSTAT[day];
-  if (!s || !s.sent) return "<span class=muted>-</span>";
-  var pct = Math.round(100 * s.opened / s.sent);
-  var full = s.opened >= s.sent;
-  return "<span class='badge " + (full ? "b-premium" : "b-draft") + "'>"
-       + (full ? "🟢" : "🔴") + " " + pct + "% (" + s.opened + "/" + s.sent + ")</span>";
-}
 function weekOf(day){ return Math.floor((day-1)/7)+1; }
 function toggleWeek(w){ WEEKOPEN[w] = !WEEKOPEN[w]; renderWeeks(); }
 function renderWeeks(){
@@ -2067,7 +2074,6 @@ function renderWeeks(){
         + "<div class=muted>" + (L.scheduled_at ? esc(L.scheduled_at) : "-") + "</div>"
         + "<div><span class='badge b-" + L.status + "'>" + statusLabel(L.status) + "</span></div>"
         + "<div class=muted>" + (L.audio ? "MP3" : "-") + "</div>"
-        + "<div>" + readCell(L.day) + "</div>"
         + "<div class=row>"
         + "<button class=b data-act=edit data-id=" + L.id + ">편집</button>"
         + "<button class=b data-act=dup data-id=" + L.id + ">복제</button>"
@@ -2079,10 +2085,6 @@ function renderWeeks(){
   host.innerHTML = html || "<div class=muted>레슨이 없습니다.</div>";
 }
 function loadLessons(){
-  return fetch("/api/read-stats").then(function(r){ return r.json(); }).then(function(s){
-    READSTAT = {};
-    (s.stats || []).forEach(function(x){ READSTAT[x.day] = x; });
-  }).catch(function(){ READSTAT = {}; }).then(function(){
   return fetch("/api/lessons").then(function(r){ return r.json(); }).then(function(d){
     LESSONS = d.lessons || [];
     var draft = 0, sch = 0, sent = 0;
@@ -2096,9 +2098,13 @@ function loadLessons(){
       "전체 "+LESSONS.length+"개 · 초안 "+draft+" · 예약 "+sch+" · 발송됨 "+sent+
       " · 무료 공개 DAY 1~"+d.free_days;
   });
-  });
 }
 
+function readToday(v){
+  if (v === "read") return "<span class='badge b-premium'>🟢 열람</span>";
+  if (v === "unread") return "<span class='badge b-draft'>🔴 미열람</span>";
+  return "<span class=muted>오늘 발송 없음</span>";
+}
 function statusKo(s){
   return s==="active"?"진행 중":s==="paused"?"일시정지":s==="completed"?"수료":
          s==="inactive"?"비활성":"시작 전";
@@ -2148,7 +2154,8 @@ function renderUsers(){
       "<td><b>"+(u.day||0)+"</b></td>"+
       "<td><span class='badge "+statusClass(st)+"'>"+statusKo(st)+"</span></td>"+
       "<td><span class='badge b-"+(u.plan==="premium"?"premium":"free")+"'>"+esc(u.plan||"free")+"</span></td>"+
-      "<td class=muted>"+esc(u.last_sent||"-")+"</td>"+
+      "<td>"+readToday(u.read_today)+"</td>"+
+        "<td class=muted>"+esc(u.last_sent||"-")+"</td>"+
       "<td><div class=row>"+
         "<select data-send='"+id+"'></select>"+
         "<button class=b data-act=usend data-uid='"+id+"'>보내기</button>"+
