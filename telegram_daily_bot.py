@@ -137,7 +137,8 @@ CREATE TABLE IF NOT EXISTS sends (
     status    TEXT,
     error     TEXT DEFAULT '',
     kind      TEXT DEFAULT 'auto',
-    created_at TEXT
+    created_at TEXT,
+    opened_at TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_sends_lesson ON sends(lesson_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lessons_day ON lessons(day);
@@ -173,6 +174,12 @@ def ensure_columns(conn):
         conn.execute("ALTER TABLE lessons ADD COLUMN quiz TEXT DEFAULT ''")
         conn.commit()
         log.info("lessons 테이블에 quiz 컬럼을 추가했습니다.")
+    scols = {r["name"] for r in conn.execute("PRAGMA table_info(sends)").fetchall()}
+    if "opened_at" not in scols:
+        conn.execute("ALTER TABLE sends ADD COLUMN opened_at TEXT DEFAULT ''")
+        conn.commit()
+        log.info("sends 테이블에 opened_at 컬럼을 추가했습니다.")
+
     for extra in ("summary", "homework", "quiz_today"):
         if extra not in lcols:
             conn.execute("ALTER TABLE lessons ADD COLUMN " + extra + " TEXT DEFAULT ''")
@@ -546,7 +553,7 @@ def payment_text():
 def send_lesson_to(chat_id, lesson, kind="auto", include_media=True):
     """레슨 한 건을 한 사람에게 보낸다. 실패하면 sends 에 기록하고 예외를 올린다."""
     try:
-        tg_text(chat_id, render_lesson(lesson), buttons=review_buttons(lesson))
+        tg_text(chat_id, render_lesson(lesson), buttons=review_buttons(lesson, chat_id))
         log_send(lesson, chat_id, "ok", "", kind)
         return True, ""
     except Exception as e:
@@ -555,7 +562,7 @@ def send_lesson_to(chat_id, lesson, kind="auto", include_media=True):
         return False, str(e)
 
 
-def broadcast_lesson(lesson, kind="auto", only_chat_ids=None):
+def broadcast_lesson(lesson, kind="auto", only_chat_ids=None, mark_last_sent=False):
     """레슨을 대상자 전원에게 보낸다. (ok, fail, skipped) 반환"""
     ok = fail = skipped = 0
     users = all_users(active_only=True)
@@ -568,11 +575,9 @@ def broadcast_lesson(lesson, kind="auto", only_chat_ids=None):
         good, _ = send_lesson_to(u["chat_id"], lesson, kind)
         if good:
             ok += 1
-            upsert_user(
-                u["chat_id"],
-                day=int(lesson.get("day") or u.get("day") or 0),
-                last_sent=now_kst().strftime("%Y-%m-%d"),
-            )
+            # 진도(day)는 절대 건드리지 않는다. 자동 일일 발송만 진도를 올린다.
+            if mark_last_sent:
+                upsert_user(u["chat_id"], last_sent=now_kst().strftime("%Y-%m-%d"))
         else:
             fail += 1
     return ok, fail, skipped
@@ -608,7 +613,7 @@ async def scheduler_loop():
         try:
             for lesson in due_lessons():
                 log.info("예약 발송: DAY %s (%s)", lesson["day"], lesson["scheduled_at"])
-                ok, fail, skipped = broadcast_lesson(lesson, "scheduled")
+                ok, fail, skipped = broadcast_lesson(lesson, "scheduled", mark_last_sent=True)
                 mark_sent(lesson)
                 log.info("DAY %s 발송 완료 — 성공 %d, 실패 %d, 제외 %d",
                          lesson["day"], ok, fail, skipped)
@@ -1071,13 +1076,21 @@ def review_url(lesson):
     return PUBLIC_URL + "/review?day=" + str(lesson.get("day") or 0)
 
 
-def review_buttons(lesson):
+def open_url(lesson, chat_id):
+    """열람 확인용 중계 주소. 누르면 기록하고 학습 페이지로 보낸다."""
+    if not chat_id:
+        return review_url(lesson)
+    return (PUBLIC_URL + "/o?u=" + urllib.parse.quote(str(chat_id))
+            + "&d=" + str(lesson.get("day") or 0))
+
+
+def review_buttons(lesson, chat_id=None):
     """복습 자료나 테스트가 있으면 웹 페이지로 가는 버튼을 붙인다."""
     if not (lesson.get("review") or lesson.get("audio") or lesson_quiz(lesson)):
         return None
     return {"inline_keyboard": [[{
         "text": "\U0001F4DA \u041f\u043e\u0432\u0442\u043e\u0440\u0435\u043d\u0438\u0435 \u0438 \u0442\u0435\u0441\u0442",
-        "url": review_url(lesson)}]]}
+        "url": open_url(lesson, chat_id)}]]}
 
 
 REVIEW_CSS = """
@@ -1352,6 +1365,8 @@ class Admin(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if path == "/o":
+            return self._open_track(q)
         if path == "/review":
             return self._review_page(q)
         if path == "/api/public/lesson":
@@ -1372,6 +1387,16 @@ class Admin(BaseHTTPRequestHandler):
             return self._json(200, {"lessons": all_lessons(), "free_days": FREE_DAYS})
         if path == "/api/users":
             return self._json(200, {"users": all_users()})
+        if path == "/api/read-stats":
+            conn = db()
+            rows = conn.execute(
+                "SELECT day, COUNT(DISTINCT chat_id) sent,"
+                " COUNT(DISTINCT CASE WHEN COALESCE(opened_at,'')<>''"
+                " THEN chat_id END) opened"
+                " FROM sends WHERE status='ok' AND kind<>'test'"
+                " AND day IS NOT NULL GROUP BY day").fetchall()
+            conn.close()
+            return self._json(200, {"stats": [dict(r) for r in rows]})
         if path == "/api/sends":
             conn = db()
             rows = conn.execute(
@@ -1623,10 +1648,8 @@ class Admin(BaseHTTPRequestHandler):
             target = str(b.get("chat_id") or "")
             if not target:
                 return self._json(400, {"error": "대상 chat_id 가 없습니다"})
+            # 수동 발송은 진도와 완전히 분리된 동작이다. 학생 진도를 바꾸지 않는다.
             good, err = send_lesson_to(target, lesson, "manual")
-            if good:
-                upsert_user(target, day=int(lesson["day"]),
-                            last_sent=now_kst().strftime("%Y-%m-%d"))
             return self._json(200 if good else 500, {"ok": good, "error": err})
         ok, fail, skipped = broadcast_lesson(lesson, "manual")
         mark_sent(lesson)
@@ -1664,6 +1687,32 @@ class Admin(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _open_track(self, q):
+        """학생이 버튼을 눌렀을 때 열람으로 기록하고 학습 페이지로 보낸다."""
+        who = (q.get("u") or [""])[0]
+        try:
+            day = int((q.get("d") or ["0"])[0])
+        except Exception:
+            day = 0
+        if who and day:
+            try:
+                with _db_lock:
+                    conn = db()
+                    conn.execute(
+                        "UPDATE sends SET opened_at=? WHERE chat_id=? AND day=?"
+                        " AND COALESCE(opened_at,'')=''",
+                        (ts(), str(who), day))
+                    conn.commit()
+                    conn.close()
+            except Exception as e:
+                log.warning("열람 기록 실패: %s", e)
+        lesson = get_lesson_by_day(day)
+        dest = (lesson or {}).get("link") or (PUBLIC_URL + "/review?day=" + str(day))
+        self.send_response(302)
+        self.send_header("Location", dest)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _public_lesson(self, q):
         """학생용 공개 데이터 (외부 사이트에서 사용). 로그인 불필요."""
@@ -1801,7 +1850,7 @@ audio{width:260px;height:34px}
 .wk-ar{width:14px;display:inline-block;color:#8a93a6}
 .wk-n{margin-left:auto;font-size:12px;color:#8a93a6}
 .wk-b{border-top:1px solid var(--line)}
-.dr{display:grid;grid-template-columns:78px 1fr 84px 128px 88px 68px auto;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);cursor:pointer}
+.dr{display:grid;grid-template-columns:74px 1fr 80px 120px 84px 60px 118px auto;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);cursor:pointer}
 .dr:last-child{border-bottom:0}
 .dr:hover{background:#141821}
 .dr-d{font-weight:600}
@@ -1973,6 +2022,15 @@ function closeEditor(){ closeModal("editor"); loadLessons(); }
 function statusLabel(s){ return s==="sent"?"발송됨":(s==="scheduled"?"예약":"초안"); }
 
 var WEEKOPEN = {};
+var READSTAT = {};
+function readCell(day){
+  var s = READSTAT[day];
+  if (!s || !s.sent) return "<span class=muted>-</span>";
+  var pct = Math.round(100 * s.opened / s.sent);
+  var full = s.opened >= s.sent;
+  return "<span class='badge " + (full ? "b-premium" : "b-draft") + "'>"
+       + (full ? "🟢" : "🔴") + " " + pct + "% (" + s.opened + "/" + s.sent + ")</span>";
+}
 function weekOf(day){ return Math.floor((day-1)/7)+1; }
 function toggleWeek(w){ WEEKOPEN[w] = !WEEKOPEN[w]; renderWeeks(); }
 function renderWeeks(){
@@ -2011,6 +2069,7 @@ function renderWeeks(){
         + "<div class=muted>" + (L.scheduled_at ? esc(L.scheduled_at) : "-") + "</div>"
         + "<div><span class='badge b-" + L.status + "'>" + statusLabel(L.status) + "</span></div>"
         + "<div class=muted>" + (L.audio ? "MP3" : "-") + "</div>"
+        + "<div>" + readCell(L.day) + "</div>"
         + "<div class=row>"
         + "<button class=b data-act=edit data-id=" + L.id + ">편집</button>"
         + "<button class=b data-act=dup data-id=" + L.id + ">복제</button>"
@@ -2022,6 +2081,10 @@ function renderWeeks(){
   host.innerHTML = html || "<div class=muted>레슨이 없습니다.</div>";
 }
 function loadLessons(){
+  return fetch("/api/read-stats").then(function(r){ return r.json(); }).then(function(s){
+    READSTAT = {};
+    (s.stats || []).forEach(function(x){ READSTAT[x.day] = x; });
+  }).catch(function(){ READSTAT = {}; }).then(function(){
   return fetch("/api/lessons").then(function(r){ return r.json(); }).then(function(d){
     LESSONS = d.lessons || [];
     var draft = 0, sch = 0, sent = 0;
@@ -2034,6 +2097,7 @@ function loadLessons(){
     document.getElementById("lessonMeta").textContent =
       "전체 "+LESSONS.length+"개 · 초안 "+draft+" · 예약 "+sch+" · 발송됨 "+sent+
       " · 무료 공개 DAY 1~"+d.free_days;
+  });
   });
 }
 
