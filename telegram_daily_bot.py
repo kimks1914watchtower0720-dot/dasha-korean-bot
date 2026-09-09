@@ -509,9 +509,7 @@ def render_lesson(lesson):
     parts.append(head)
     if lesson.get("title_ru"):
         parts.append("<i>" + html.escape(lesson["title_ru"]) + "</i>")
-    if lesson.get("link"):
-        parts.append("")
-        parts.append("\U0001F3A7 <b>\u0410\u0443\u0434\u0438\u043E + \u0442\u0435\u0441\u0442:</b> " + lesson["link"])
+    # 오디오/테스트 링크는 메시지 아래 버튼으로만 제공한다 (본문 중복 제거).
     if lesson.get("body"):
         parts.append("")
         parts.append(lesson["body"])
