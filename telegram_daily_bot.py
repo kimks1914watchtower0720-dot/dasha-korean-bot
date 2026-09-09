@@ -15,6 +15,8 @@
 
 import asyncio
 import hmac
+import io
+import zipfile
 import html
 import json
 import logging
@@ -53,6 +55,9 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 MEDIA_DIR = DATA_DIR / "media"
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "cms.db"
+BACKUP_DIR = DATA_DIR / "backups"
+BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "14"))
 KST = pytz.timezone("Asia/Seoul")
 
 FREE_DAYS = int(os.environ.get("FREE_DAYS", "7"))
@@ -698,6 +703,8 @@ async def daily_loop():
     while True:
         try:
             n = now_kst()
+            if not (BACKUP_DIR / ("cms-" + n.strftime("%Y-%m-%d") + ".db")).exists():
+                await asyncio.to_thread(make_daily_backup)
             past = n.hour > SEND_HOUR or (n.hour == SEND_HOUR and n.minute >= SEND_MINUTE)
             if DAILY_AUTO and past:
                 sent, locked, fail = await asyncio.to_thread(run_daily_batch)
@@ -1106,6 +1113,54 @@ def import_legacy_audio(conn):
         log.info("DAY %s 음성 파일을 관리자 저장소로 옮겼습니다.", day)
 
 
+def backup_db_file(dest):
+    """실행 중에도 안전하게 DB 를 통째로 복사한다."""
+    src = sqlite3.connect(str(DB_PATH))
+    dst = sqlite3.connect(str(dest))
+    try:
+        with dst:
+            src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+
+
+def make_daily_backup():
+    """하루 한 번 볼륨 안에 날짜별 사본을 남기고 오래된 것은 지운다."""
+    try:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        dest = BACKUP_DIR / ("cms-" + now_kst().strftime("%Y-%m-%d") + ".db")
+        backup_db_file(dest)
+        files = sorted(BACKUP_DIR.glob("cms-*.db"))
+        for old in files[:max(0, len(files) - BACKUP_KEEP)]:
+            try:
+                old.unlink()
+            except Exception:
+                pass
+        log.info("백업 저장 완료: %s (보관 %d개)", dest.name, min(len(files), BACKUP_KEEP))
+    except Exception as e:
+        log.warning("백업 실패: %s", e)
+
+
+def backup_zip_bytes():
+    """DB 스냅샷 + 음성/자료 파일을 zip 한 덩어리로 만든다."""
+    tmp = DATA_DIR / ("backup-tmp-" + str(int(time.time())) + ".db")
+    try:
+        backup_db_file(tmp)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(tmp, "cms.db")
+            for p in sorted(MEDIA_DIR.glob("*")):
+                if p.is_file():
+                    z.write(p, "media/" + p.name)
+        return buf.getvalue()
+    finally:
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+
+
 def review_url(lesson):
     link = (lesson.get("link") or "").strip()
     if link:
@@ -1424,6 +1479,8 @@ class Admin(BaseHTTPRequestHandler):
             return self._json(200, {"lessons": all_lessons(), "free_days": FREE_DAYS})
         if path == "/api/users":
             return self._json(200, {"users": with_read_today(all_users())})
+        if path == "/api/backup":
+            return self._backup_zip()
         if path == "/api/sends":
             conn = db()
             rows = conn.execute(
@@ -1715,6 +1772,21 @@ class Admin(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _backup_zip(self):
+        """관리자가 내려받는 전체 백업 (DB + 음성/자료)."""
+        try:
+            data = backup_zip_bytes()
+        except Exception as e:
+            return self._json(500, {"error": "백업 생성 실패: " + str(e)})
+        name = "korean365-backup-" + now_kst().strftime("%Y%m%d-%H%M") + ".zip"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition",
+                         "attachment; filename=" + chr(34) + name + chr(34))
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _open_track(self, q):
         """학생이 버튼을 눌렀을 때 열람으로 기록하고 학습 페이지로 보낸다."""
         who = (q.get("u") or [""])[0]
@@ -1918,6 +1990,7 @@ header{flex-wrap:wrap}
   <section id="p-lessons">
     <div class="bar">
       <button class="b p" onclick="openEditor(null)">+ 새 레슨</button>
+      <button class="b" onclick="location.href='/api/backup'">백업 내려받기</button>
       <span class="muted" id="lessonMeta"></span>
     </div>
     <div id="lessonWeeks"></div>
@@ -2525,6 +2598,7 @@ def main():
     if not BOT_TOKEN:
         raise SystemExit("TG_BOT_TOKEN 환경변수가 필요합니다.")
     init_db()
+    make_daily_backup()
     start_admin_server()
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(_post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
