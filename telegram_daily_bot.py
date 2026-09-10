@@ -145,6 +145,16 @@ CREATE TABLE IF NOT EXISTS sends (
     created_at TEXT,
     opened_at TEXT DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS phrases (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    day        INTEGER NOT NULL,
+    ko         TEXT DEFAULT '',
+    ru         TEXT DEFAULT '',
+    note       TEXT DEFAULT '',
+    audio      TEXT DEFAULT '',
+    updated_at TEXT DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_phrases_day ON phrases(day);
 CREATE INDEX IF NOT EXISTS idx_sends_lesson ON sends(lesson_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lessons_day ON lessons(day);
 """
@@ -184,6 +194,15 @@ def ensure_columns(conn):
         conn.execute("ALTER TABLE sends ADD COLUMN opened_at TEXT DEFAULT ''")
         conn.commit()
         log.info("sends 테이블에 opened_at 컬럼을 추가했습니다.")
+
+    ucols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "talk_started" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN talk_started INTEGER DEFAULT 0")
+    if "talk_day" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN talk_day INTEGER DEFAULT 0")
+    if "talk_last_sent" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN talk_last_sent TEXT DEFAULT ''")
+    conn.commit()
 
     for extra in ("summary", "homework", "quiz_today"):
         if extra not in lcols:
@@ -668,6 +687,38 @@ SEND_MINUTE = int(os.environ.get("SEND_MINUTE", "0"))
 DAILY_AUTO = os.environ.get("DAILY_AUTO", "1") != "0"
 
 
+def run_talk_batch():
+    """회화 과정을 신청한 학생에게 하루 한 줄씩 보낸다. 정규 과정 진도와 완전히 별개."""
+    today = now_kst().strftime("%Y-%m-%d")
+    sent = locked = fail = 0
+    for u in all_users(active_only=True):
+        if int(u.get("talk_started") or 0) != 1:
+            continue
+        if (u.get("talk_last_sent") or "") == today:
+            continue
+        chat_id = u["chat_id"]
+        cur = int(u.get("talk_day") or 0)
+        nxt = cur + 1 if cur >= 1 else 1
+        phrase = get_phrase_by_day(nxt)
+        if not phrase:
+            continue
+        if nxt > FREE_DAYS and u.get("plan") != "premium":
+            try:
+                tg_text(chat_id, paywall_text())
+                upsert_user(chat_id, talk_last_sent=today)
+                locked += 1
+            except Exception:
+                fail += 1
+            continue
+        good, _ = send_phrase_to(chat_id, phrase, "talk")
+        if good:
+            upsert_user(chat_id, talk_day=nxt, talk_last_sent=today)
+            sent += 1
+        else:
+            fail += 1
+    return sent, locked, fail
+
+
 def run_daily_batch():
     """학생별 진도에 맞춰 다음 DAY 를 하루 한 번 보낸다. (발송, 잠금안내, 실패) 반환"""
     today = now_kst().strftime("%Y-%m-%d")
@@ -708,6 +759,10 @@ async def daily_loop():
             past = n.hour > SEND_HOUR or (n.hour == SEND_HOUR and n.minute >= SEND_MINUTE)
             if DAILY_AUTO and past:
                 sent, locked, fail = await asyncio.to_thread(run_daily_batch)
+                t_sent, t_locked, t_fail = await asyncio.to_thread(run_talk_batch)
+                sent += t_sent
+                locked += t_locked
+                fail += t_fail
                 if sent or locked or fail:
                     log.info("자동 발송 — 발송 %d, 잠금안내 %d, 실패 %d", sent, locked, fail)
                     if ADMIN_CHAT_ID:
@@ -721,6 +776,61 @@ async def daily_loop():
         except Exception as e:
             log.warning("자동 발송 루프 오류: %s", e)
         await asyncio.sleep(60)
+
+
+def all_phrases():
+    conn = db()
+    rows = conn.execute("SELECT * FROM phrases ORDER BY day ASC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_phrase_by_day(day):
+    conn = db()
+    r = conn.execute("SELECT * FROM phrases WHERE day=?", (int(day),)).fetchone()
+    conn.close()
+    return dict(r) if r else None
+
+
+def claim_talk_start(chat_id):
+    """회화 과정 시작을 한 번만 허용한다 (연타·재시작 방지)."""
+    with _db_lock:
+        conn = db()
+        cur = conn.execute(
+            "UPDATE users SET talk_started=1, talk_day=1 WHERE chat_id=?"
+            " AND COALESCE(talk_started,0)=0", (str(chat_id),))
+        conn.commit()
+        ok = cur.rowcount == 1
+        conn.close()
+    return ok
+
+
+def render_phrase(p):
+    """회화 한 줄을 텔레그램 메시지로 만든다."""
+    parts = []
+    parts.append("\U0001F4AC <b>\u0424\u0440\u0430\u0437\u0430 \u0434\u043d\u044f " + str(p.get("day")) + "</b>")
+    parts.append("")
+    if p.get("ko"):
+        parts.append("<b>" + html.escape(p["ko"]) + "</b>")
+    if p.get("ru"):
+        parts.append(html.escape(p["ru"]))
+    if p.get("note"):
+        parts.append("")
+        parts.append(html.escape(p["note"]))
+    return "\n".join(parts).strip()
+
+
+def send_phrase_to(chat_id, phrase, kind="talk"):
+    try:
+        tg_text(chat_id, render_phrase(phrase))
+        if phrase.get("audio"):
+            p = MEDIA_DIR / phrase["audio"]
+            if p.exists():
+                tg_audio(chat_id, p, "Фраза дня " + str(phrase.get("day")))
+        return True, ""
+    except Exception as e:
+        log.warning("회화 발송 실패 chat_id=%s day=%s: %s", chat_id, phrase.get("day"), e)
+        return False, str(e)
 
 
 def claim_course_start(chat_id):
@@ -758,7 +868,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if already:
         # 이미 시작한 사람에게는 시작 버튼을 다시 보여주지 않는다. 진도도 건드리지 않는다.
-        again_kb = InlineKeyboardMarkup([[InlineKeyboardButton("\U0001F4B3 \uc720\ub8cc \uad6c\ub3c5 \uc2e0\uccad / \u041E\u0444\u043E\u0440\u043C\u0438\u0442\u044C \u043F\u043E\u0434\u043F\u0438\u0441\u043A\u0443", callback_data="apply_premium")]])
+        again_rows = []
+        if int(user.get("talk_started") or 0) != 1:
+            again_rows.append([InlineKeyboardButton("\U0001F4AC 매일 한마디 회화 / \u0424\u0440\u0430\u0437\u0430 \u0434\u043d\u044f", callback_data="start_talk")])
+        again_rows.append([InlineKeyboardButton("\U0001F4B3 \uc720\ub8cc \uad6c\ub3c5 \uc2e0\uccad / \u041E\u0444\u043E\u0440\u043C\u0438\u0442\u044C \u043F\u043E\u0434\u043F\u0438\u0441\u043A\u0443", callback_data="apply_premium")])
+        again_kb = InlineKeyboardMarkup(again_rows)
         await update.message.reply_text(
             "\ub2e4\uc2dc \uc624\uc168\ub124\uc694! \uc774\ubbf8 \ud559\uc2b5\uc744 \uc2dc\uc791\ud558\uc168\uc2b5\ub2c8\ub2e4.\n"
             "\ud604\uc7ac \uc9c4\ub3c4: DAY " + str(max(day, 1)) + "\n\n"
@@ -773,6 +887,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("\U0001F331 \uccab\ub0a0 \uc2dc\uc791\ud558\uae30 / \u041D\u0430\u0447\u0430\u0442\u044C DAY 1", callback_data="start_day1")],
+            [InlineKeyboardButton("\U0001F4AC 매일 한마디 회화 / \u0424\u0440\u0430\u0437\u0430 \u0434\u043d\u044f", callback_data="start_talk")],
             [InlineKeyboardButton("\U0001F4B3 \uc720\ub8cc \uad6c\ub3c5 \uc2e0\uccad / \u041E\u0444\u043E\u0440\u043C\u0438\u0442\u044C \u043F\u043E\u0434\u043F\u0438\u0441\u043A\u0443", callback_data="apply_premium")],
         ]
     )
@@ -816,6 +931,24 @@ async def cb_start_day1(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
     await asyncio.to_thread(send_lesson_to, chat_id, lesson, "manual")
+
+
+async def cb_start_talk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    chat_id = str(query.message.chat.id)
+    user = get_user(chat_id) or {}
+    if int(user.get("talk_started") or 0) == 1:
+        await query.answer("이미 시작하셨어요 / \u0412\u044b \u0443\u0436\u0435 \u043d\u0430\u0447\u0430\u043b\u0438", show_alert=False)
+        return
+    if not claim_talk_start(chat_id):
+        await query.answer("이미 시작하셨어요 / \u0412\u044b \u0443\u0436\u0435 \u043d\u0430\u0447\u0430\u043b\u0438", show_alert=False)
+        return
+    await query.answer()
+    phrase = get_phrase_by_day(1)
+    if not phrase:
+        await query.message.reply_text("회화 콘텐츠가 아직 준비되지 않았습니다.")
+        return
+    await asyncio.to_thread(send_phrase_to, chat_id, phrase, "talk")
 
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1470,6 +1603,8 @@ class Admin(BaseHTTPRequestHandler):
 
         if path == "/api/lessons":
             return self._json(200, {"lessons": all_lessons(), "free_days": FREE_DAYS})
+        if path == "/api/phrases":
+            return self._json(200, {"phrases": all_phrases(), "free_days": FREE_DAYS})
         if path == "/api/users":
             return self._json(200, {"users": with_read_today(all_users())})
         if path == "/api/backup":
@@ -1519,6 +1654,10 @@ class Admin(BaseHTTPRequestHandler):
         except Exception:
             b = {}
 
+        if path == "/api/phrase/save":
+            return self._save_phrase(b)
+        if path == "/api/phrase/delete":
+            return self._delete_phrase(b)
         if path == "/api/lesson/save":
             return self._save_lesson(b)
         if path == "/api/lesson/delete":
@@ -1616,6 +1755,55 @@ class Admin(BaseHTTPRequestHandler):
         return self._json(200, {"ok": True, "user": get_user(cid)})
 
     # --- 레슨 처리 ---
+    def _save_phrase(self, b):
+        try:
+            day = int(b.get("day") or 0)
+        except Exception:
+            return self._json(400, {"error": "DAY 번호가 올바르지 않습니다"})
+        if day <= 0:
+            return self._json(400, {"error": "DAY 번호는 1 이상이어야 합니다"})
+        fields = {
+            "day": day,
+            "ko": b.get("ko", ""),
+            "ru": b.get("ru", ""),
+            "note": b.get("note", ""),
+            "updated_at": ts(),
+        }
+        pid = b.get("id")
+        with _db_lock:
+            conn = db()
+            try:
+                if pid:
+                    cols = ", ".join(k + "=?" for k in fields)
+                    conn.execute("UPDATE phrases SET " + cols + " WHERE id=?",
+                                 tuple(fields.values()) + (int(pid),))
+                else:
+                    keys = ", ".join(fields)
+                    marks = ", ".join("?" for _ in fields)
+                    cur = conn.execute("INSERT INTO phrases (" + keys + ") VALUES (" + marks + ")",
+                                       tuple(fields.values()))
+                    pid = cur.lastrowid
+                conn.commit()
+            except sqlite3.IntegrityError:
+                conn.close()
+                return self._json(400, {"error": "이미 같은 DAY 번호의 문장이 있습니다"})
+            conn.close()
+        return self._json(200, {"ok": True, "id": pid})
+
+    def _delete_phrase(self, b):
+        try:
+            pid = int(b.get("id") or 0)
+        except Exception:
+            pid = 0
+        if not pid:
+            return self._json(400, {"error": "id 가 없습니다"})
+        with _db_lock:
+            conn = db()
+            conn.execute("DELETE FROM phrases WHERE id=?", (pid,))
+            conn.commit()
+            conn.close()
+        return self._json(200, {"ok": True})
+
     def _save_lesson(self, b):
         try:
             day = int(b.get("day") or 0)
@@ -1964,6 +2152,7 @@ a.logout{margin-top:0}.grid,.grid.two{grid-template-columns:1fr}
     <h1>한국어365 관리자</h1>
     <div class="tabs">
       <button id="t-lessons" class="on" onclick="tab('lessons')">레슨</button>
+      <button id="t-talk" onclick="tab('talk')">회화</button>
       <button id="t-users" onclick="tab('users')">학생</button>
       <button id="t-log" onclick="tab('log')">발송 기록</button>
     </div>
@@ -1977,6 +2166,17 @@ a.logout{margin-top:0}.grid,.grid.two{grid-template-columns:1fr}
       <span class="muted" id="lessonMeta"></span>
     </div>
     <div id="lessonWeeks"></div>
+  </section>
+
+  <section id="p-talk" class="hidden">
+    <div class="bar">
+      <button class="b p" onclick="openPhrase(null)">+ 새 문장</button>
+      <span class="muted" id="talkMeta"></span>
+    </div>
+    <div class="card"><table>
+      <thead><tr><th>DAY</th><th>한국어</th><th>러시아어</th><th>설명</th><th>관리</th></tr></thead>
+      <tbody id="talkRows"></tbody>
+    </table></div>
   </section>
 
   <section id="p-users" class="hidden">
@@ -2101,6 +2301,21 @@ a.logout{margin-top:0}.grid,.grid.two{grid-template-columns:1fr}
   </div>
 </div></div>
 
+<div class="modal" id="phraseBox"><div class="sheet" style="max-width:640px">
+  <h2 id="phTitle">회화 문장</h2>
+  <input type="hidden" id="ph-id">
+  <div class="grid two">
+    <label>DAY 번호<input type="number" id="ph-day" min="1"></label>
+    <label class="full">한국어 문장<input type="text" id="ph-ko" placeholder="안녕하세요"></label>
+    <label class="full">러시아어 뜻<input type="text" id="ph-ru" placeholder="Здравствуйте"></label>
+    <label class="full">언제 쓰는지 (러시아어 설명)<textarea id="ph-note" style="min-height:90px"></textarea></label>
+  </div>
+  <div class="foot">
+    <button class="b p" onclick="savePhrase()">저장</button>
+    <div class="right"><button class="b" onclick="closeModal('phraseBox')">닫기</button></div>
+  </div>
+</div></div>
+
 <div class="toast" id="toast"></div>
 """
 
@@ -2115,7 +2330,7 @@ function api(path, body){
     .then(function(r){ return r.json(); });
 }
 function tab(name){
-  ["lessons","users","log"].forEach(function(n){
+  ["lessons","talk","users","log"].forEach(function(n){
     document.getElementById("p-"+n).classList.toggle("hidden", n!==name);
     document.getElementById("t-"+n).classList.toggle("on", n===name);
   });
@@ -2196,6 +2411,57 @@ function readToday(v){
   if (v === "unread") return "<span class='badge b-draft'>🔴 미열람</span>";
   return "<span class=muted>오늘 발송 없음</span>";
 }
+var PHRASES = [];
+function loadPhrases(){
+  return fetch("/api/phrases").then(function(r){ return r.json(); }).then(function(d){
+    PHRASES = d.phrases || [];
+    var tb = document.getElementById("talkRows");
+    if (!tb) return;
+    tb.innerHTML = "";
+    PHRASES.forEach(function(P){
+      var tr = document.createElement("tr");
+      tr.innerHTML =
+        "<td><b>DAY " + P.day + "</b></td>" +
+        "<td>" + esc(P.ko || "-") + "</td>" +
+        "<td>" + esc(P.ru || "-") + "</td>" +
+        "<td class=muted>" + esc(P.note || "") + "</td>" +
+        "<td><div class=row>" +
+          "<button class=b data-act=phedit data-id=" + P.id + ">편집</button>" +
+          "<button class='b d' data-act=phdel data-id=" + P.id + ">삭제</button>" +
+        "</div></td>";
+      tb.appendChild(tr);
+    });
+    document.getElementById("talkMeta").textContent =
+      "전체 " + PHRASES.length + "개 · 무료 공개 DAY 1~" + d.free_days;
+  });
+}
+function openPhrase(id){
+  var P = null;
+  for (var i = 0; i < PHRASES.length; i++) { if (PHRASES[i].id === id) P = PHRASES[i]; }
+  var next = 1;
+  PHRASES.forEach(function(x){ if (x.day >= next) next = x.day + 1; });
+  document.getElementById("phTitle").textContent = P ? ("회화 DAY " + P.day) : "새 문장";
+  document.getElementById("ph-id").value = P ? P.id : "";
+  document.getElementById("ph-day").value = P ? P.day : next;
+  document.getElementById("ph-ko").value = P ? (P.ko || "") : "";
+  document.getElementById("ph-ru").value = P ? (P.ru || "") : "";
+  document.getElementById("ph-note").value = P ? (P.note || "") : "";
+  document.getElementById("phraseBox").classList.add("on");
+}
+function savePhrase(){
+  var data = {
+    id: document.getElementById("ph-id").value || null,
+    day: document.getElementById("ph-day").value,
+    ko: document.getElementById("ph-ko").value,
+    ru: document.getElementById("ph-ru").value,
+    note: document.getElementById("ph-note").value
+  };
+  api("/api/phrase/save", data).then(function(r){
+    if (r.ok) { toast("저장했습니다"); closeModal("phraseBox"); loadPhrases(); }
+    else toast("저장 실패: " + (r.error || ""));
+  });
+}
+
 function statusKo(s){
   return s==="active"?"진행 중":s==="paused"?"일시정지":s==="completed"?"수료":
          s==="inactive"?"비활성":"시작 전";
@@ -2482,6 +2748,13 @@ document.addEventListener("click", function(e){
   var val = b.getAttribute("data-val");
 
   if(act==="edit"){ openEditor(parseInt(id,10)); return; }
+  if(act==="phedit"){ openPhrase(parseInt(id,10)); return; }
+  if(act==="phdel"){
+    if(!confirm("이 문장을 삭제할까요?")) return;
+    api("/api/phrase/delete", {id: parseInt(id,10)}).then(function(r){
+      if(r.ok){ toast("삭제했습니다"); loadPhrases(); } else toast("삭제 실패");
+    }); return;
+  }
   if(act==="dup"){
     api("/api/lesson/duplicate", {id: parseInt(id,10)}).then(function(r){
       if(r.ok){ toast("DAY "+r.day+" 로 복제했습니다"); loadLessons(); }
@@ -2555,6 +2828,7 @@ document.addEventListener("keydown", function(e){
 });
 
 loadLessons();
+loadPhrases();
 setInterval(function(){
   if(!document.getElementById("editor").classList.contains("on")) loadLessons();
 }, 60000);
@@ -2589,6 +2863,7 @@ def main():
     app.add_handler(CommandHandler("premium", cmd_premium))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CallbackQueryHandler(cb_start_day1, pattern="^start_day1$"))
+    app.add_handler(CallbackQueryHandler(cb_start_talk, pattern="^start_talk$"))
     app.add_handler(CallbackQueryHandler(cb_apply_premium, pattern="^apply_premium$"))
     log.info("봇 시작됨.")
     app.run_polling()
