@@ -1674,6 +1674,8 @@ class Admin(BaseHTTPRequestHandler):
         except Exception:
             b = {}
 
+        if path == "/api/phrase/send":
+            return self._send_phrase(b)
         if path == "/api/phrase/save":
             return self._save_phrase(b)
         if path == "/api/phrase/delete":
@@ -1775,6 +1777,21 @@ class Admin(BaseHTTPRequestHandler):
         return self._json(200, {"ok": True, "user": get_user(cid)})
 
     # --- 레슨 처리 ---
+    def _send_phrase(self, b):
+        """회화 한 줄을 지정한 학생에게 보낸다. 진도는 바꾸지 않는다."""
+        try:
+            day = int(b.get("day") or 0)
+        except Exception:
+            day = 0
+        target = str(b.get("chat_id") or "")
+        if not target:
+            return self._json(400, {"error": "대상 chat_id 가 없습니다"})
+        phrase = get_phrase_by_day(day)
+        if not phrase:
+            return self._json(404, {"error": "DAY " + str(day) + " 회화 문장이 없습니다"})
+        good, err = send_phrase_to(target, phrase, "manual")
+        return self._json(200 if good else 500, {"ok": good, "error": err})
+
     def _save_phrase(self, b):
         try:
             day = int(b.get("day") or 0)
@@ -2223,7 +2240,7 @@ a.logout{margin-top:0}.grid,.grid.two{grid-template-columns:1fr}
       <span class="muted" id="userMeta"></span>
     </div>
     <div class="card"><table>
-      <thead><tr><th>ID</th><th>이름 / 아이디</th><th>등록일</th><th>시작일</th><th>시작 DAY</th><th>현재 DAY</th><th>상태</th><th>요금제</th><th>오늘 열람</th><th>마지막 발송</th><th>작업</th></tr></thead>
+      <thead><tr><th>ID</th><th>이름 / 아이디</th><th>등록일</th><th>시작일</th><th>시작 DAY</th><th>현재 DAY</th><th>회화</th><th>상태</th><th>요금제</th><th>오늘 열람</th><th>마지막 발송</th><th>작업</th></tr></thead>
       <tbody id="userRows"></tbody>
     </table></div>
   </section>
@@ -2523,6 +2540,12 @@ function savePhrase(){
   });
 }
 
+function talkCell(u){
+  if (String(u.talk_started) !== "1") return "<span class='badge b-draft'>미신청</span>";
+  var d = parseInt(u.talk_day || 0, 10);
+  if (!d) return "<span class='badge b-scheduled'>대기</span>";
+  return "<span class='badge b-premium'>DAY " + d + "</span>";
+}
 function statusKo(s){
   return s==="active"?"진행 중":s==="paused"?"일시정지":s==="completed"?"수료":
          s==="inactive"?"비활성":"시작 전";
@@ -2570,13 +2593,16 @@ function renderUsers(){
       "<td class=muted>"+esc((u.started_at||"").slice(0,10)||"-")+"</td>"+
       "<td>"+(u.start_day||1)+"</td>"+
       "<td><b>"+(u.day||0)+"</b></td>"+
-      "<td><span class='badge "+statusClass(st)+"'>"+statusKo(st)+"</span></td>"+
+      "<td>"+talkCell(u)+"</td>"+
+        "<td><span class='badge "+statusClass(st)+"'>"+statusKo(st)+"</span></td>"+
       "<td><span class='badge b-"+(u.plan==="premium"?"premium":"free")+"'>"+esc(u.plan||"free")+"</span></td>"+
       "<td>"+readToday(u.read_today)+"</td>"+
         "<td class=muted>"+esc(u.last_sent||"-")+"</td>"+
       "<td><div class=row>"+
         "<select data-send='"+id+"'></select>"+
-        "<button class=b data-act=usend data-uid='"+id+"'>보내기</button>"+
+        "<button class=b data-act=usend data-uid='"+id+"'>레슨 발송</button>"+
+        "<input type=number min=1 max=365 data-tday='"+id+"' placeholder='회화 DAY' style='width:92px'>"+
+        "<button class=b data-act=tsend data-uid='"+id+"'>회화 발송</button>"+
         "<button class=b data-act=uedit data-uid='"+id+"'>편집</button>"+
         (st==="paused"||st==="inactive"
           ? "<button class=b data-act=ustatus data-uid='"+id+"' data-val=active>활성</button>"
@@ -2809,6 +2835,14 @@ document.addEventListener("click", function(e){
   var val = b.getAttribute("data-val");
 
   if(act==="edit"){ openEditor(parseInt(id,10)); return; }
+  if(act==="tsend"){
+    var box=document.querySelector("[data-tday='"+uid+"']");
+    var day=parseInt((box&&box.value)||"0",10);
+    if(!day){ toast("회화 DAY 번호를 입력하세요"); return; }
+    api("/api/phrase/send", {day:day, chat_id:uid}).then(function(r){
+      toast(r.ok ? ("회화 DAY "+day+" 발송 완료") : ("발송 실패: "+(r.error||"")));
+    }); return;
+  }
   if(act==="phedit"){ openPhrase(parseInt(id,10)); return; }
   if(act==="phdel"){
     if(!confirm("이 문장을 삭제할까요?")) return;
