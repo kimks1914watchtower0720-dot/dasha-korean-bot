@@ -155,6 +155,12 @@ CREATE TABLE IF NOT EXISTS phrases (
     ex_ko      TEXT DEFAULT '',
     ex_ru      TEXT DEFAULT '',
     note       TEXT DEFAULT '',
+    ptype2     TEXT DEFAULT '',
+    ko2        TEXT DEFAULT '',
+    ru2        TEXT DEFAULT '',
+    ex_ko2     TEXT DEFAULT '',
+    ex_ru2     TEXT DEFAULT '',
+    note2      TEXT DEFAULT '',
     audio      TEXT DEFAULT '',
     updated_at TEXT DEFAULT ''
 );
@@ -195,7 +201,8 @@ def ensure_columns(conn):
         log.info("lessons 테이블에 quiz 컬럼을 추가했습니다.")
     try:
         pcols = {r["name"] for r in conn.execute("PRAGMA table_info(phrases)").fetchall()}
-        for c in ("week_theme", "ptype", "ex_ko", "ex_ru"):
+        for c in ("week_theme", "ptype", "ex_ko", "ex_ru",
+                  "ptype2", "ko2", "ru2", "ex_ko2", "ex_ru2", "note2"):
             if c not in pcols:
                 conn.execute("ALTER TABLE phrases ADD COLUMN " + c + " TEXT DEFAULT ''")
         conn.commit()
@@ -837,6 +844,23 @@ def render_phrase(p):
     if p.get("note"):
         parts.append("")
         parts.append("\U0001F4A1 " + html.escape(p["note"]))
+    if p.get("ko2"):
+        parts.append("")
+        parts.append("\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+        label = "\u0421\u043b\u0435\u043d\u0433" if p.get("ptype2") == "slang" else "\u0415\u0449\u0451 \u043e\u0434\u043d\u043e \u0432\u044b\u0440\u0430\u0436\u0435\u043d\u0438\u0435"
+        parts.append("\U0001F5E3 <b>" + label + "</b>")
+        parts.append("")
+        parts.append("<b>" + html.escape(p["ko2"]) + "</b>")
+        if p.get("ru2"):
+            parts.append(html.escape(p["ru2"]))
+        if p.get("ex_ko2"):
+            parts.append("")
+            parts.append("\U0001F4DD <b>" + html.escape(p["ex_ko2"]) + "</b>")
+            if p.get("ex_ru2"):
+                parts.append(html.escape(p["ex_ru2"]))
+        if p.get("note2"):
+            parts.append("")
+            parts.append("\U0001F4A1 " + html.escape(p["note2"]))
     return "\n".join(parts).strip()
 
 
@@ -1808,6 +1832,12 @@ class Admin(BaseHTTPRequestHandler):
             "ex_ko": b.get("ex_ko", ""),
             "ex_ru": b.get("ex_ru", ""),
             "note": b.get("note", ""),
+            "ptype2": b.get("ptype2", ""),
+            "ko2": b.get("ko2", ""),
+            "ru2": b.get("ru2", ""),
+            "ex_ko2": b.get("ex_ko2", ""),
+            "ex_ru2": b.get("ex_ru2", ""),
+            "note2": b.get("note2", ""),
             "updated_at": ts(),
         }
         pid = b.get("id")
@@ -2355,6 +2385,12 @@ a.logout{margin-top:0}.grid,.grid.two{grid-template-columns:1fr}
     <label class="full">예문 (한국어)<input type="text" id="ph-exko" placeholder="선생님, 안녕하세요!"></label>
     <label class="full">예문 (러시아어)<input type="text" id="ph-exru" placeholder="Учитель, здравствуйте!"></label>
     <label class="full">설명 (러시아어)<textarea id="ph-note" style="min-height:90px"></textarea></label>
+    <label class="full" style="border-top:1px solid var(--line);padding-top:14px;margin-top:4px">두 번째 표현 — 슬랭 등 (비우면 안 나감)
+      <input type="text" id="ph-ko2" placeholder="ㅎㅇ"></label>
+    <label class="full">두 번째 표현 뜻<input type="text" id="ph-ru2" placeholder="Хай"></label>
+    <label class="full">두 번째 예문 (한국어)<input type="text" id="ph-exko2"></label>
+    <label class="full">두 번째 예문 (러시아어)<input type="text" id="ph-exru2"></label>
+    <label class="full">두 번째 설명<textarea id="ph-note2" style="min-height:70px"></textarea></label>
   </div>
   <div class="foot">
     <button class="b p" onclick="savePhrase()">저장</button>
@@ -2497,7 +2533,7 @@ function renderPhrases(){
       html += "<div class=pw data-act=phedit data-id=" + P.id + ">"
         + "<b>DAY " + P.day + "</b>"
         + "<div>" + esc(P.ko || "-") + "</div>"
-        + "<div class=muted>" + esc(P.ru || "") + "</div>"
+        + "<div class=muted>" + esc(P.ru || "") + (P.ko2 ? (" · \uD83D\uDDE3 " + esc(P.ko2)) : "") + "</div>"
         + "<div class=row>"
         + "<button class=b data-act=phedit data-id=" + P.id + ">편집</button>"
         + "<button class='b d' data-act=phdel data-id=" + P.id + ">삭제</button>"
@@ -2521,6 +2557,11 @@ function openPhrase(id){
   document.getElementById("ph-exko").value = P ? (P.ex_ko || "") : "";
   document.getElementById("ph-exru").value = P ? (P.ex_ru || "") : "";
   document.getElementById("ph-note").value = P ? (P.note || "") : "";
+  document.getElementById("ph-ko2").value = P ? (P.ko2 || "") : "";
+  document.getElementById("ph-ru2").value = P ? (P.ru2 || "") : "";
+  document.getElementById("ph-exko2").value = P ? (P.ex_ko2 || "") : "";
+  document.getElementById("ph-exru2").value = P ? (P.ex_ru2 || "") : "";
+  document.getElementById("ph-note2").value = P ? (P.note2 || "") : "";
   document.getElementById("phraseBox").classList.add("on");
 }
 function savePhrase(){
@@ -2532,7 +2573,13 @@ function savePhrase(){
     ru: document.getElementById("ph-ru").value,
     ex_ko: document.getElementById("ph-exko").value,
     ex_ru: document.getElementById("ph-exru").value,
-    note: document.getElementById("ph-note").value
+    note: document.getElementById("ph-note").value,
+    ptype2: (document.getElementById("ph-ko2").value ? "slang" : ""),
+    ko2: document.getElementById("ph-ko2").value,
+    ru2: document.getElementById("ph-ru2").value,
+    ex_ko2: document.getElementById("ph-exko2").value,
+    ex_ru2: document.getElementById("ph-exru2").value,
+    note2: document.getElementById("ph-note2").value
   };
   api("/api/phrase/save", data).then(function(r){
     if (r.ok) { toast("저장했습니다"); closeModal("phraseBox"); loadPhrases(); }
