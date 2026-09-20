@@ -2533,7 +2533,7 @@ function renderPhrases(){
       html += "<div class=pw data-act=phedit data-id=" + P.id + ">"
         + "<b>DAY " + P.day + "</b>"
         + "<div>" + esc(P.ko || "-") + "</div>"
-        + "<div class=muted>" + esc(P.ru || "") + (P.ko2 ? (" · \uD83D\uDDE3 " + esc(P.ko2)) : "") + "</div>"
+        + "<div class=muted>" + esc(P.ru || "") + (P.ko2 ? (" · 🗣 " + esc(P.ko2)) : "") + "</div>"
         + "<div class=row>"
         + "<button class=b data-act=phedit data-id=" + P.id + ">편집</button>"
         + "<button class='b d' data-act=phdel data-id=" + P.id + ">삭제</button>"
