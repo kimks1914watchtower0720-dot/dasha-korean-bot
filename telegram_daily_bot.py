@@ -148,8 +148,12 @@ CREATE TABLE IF NOT EXISTS sends (
 CREATE TABLE IF NOT EXISTS phrases (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     day        INTEGER NOT NULL,
+    week_theme TEXT DEFAULT '',
+    ptype      TEXT DEFAULT 'phrase',
     ko         TEXT DEFAULT '',
     ru         TEXT DEFAULT '',
+    ex_ko      TEXT DEFAULT '',
+    ex_ru      TEXT DEFAULT '',
     note       TEXT DEFAULT '',
     audio      TEXT DEFAULT '',
     updated_at TEXT DEFAULT ''
@@ -189,6 +193,15 @@ def ensure_columns(conn):
         conn.execute("ALTER TABLE lessons ADD COLUMN quiz TEXT DEFAULT ''")
         conn.commit()
         log.info("lessons 테이블에 quiz 컬럼을 추가했습니다.")
+    try:
+        pcols = {r["name"] for r in conn.execute("PRAGMA table_info(phrases)").fetchall()}
+        for c in ("week_theme", "ptype", "ex_ko", "ex_ru"):
+            if c not in pcols:
+                conn.execute("ALTER TABLE phrases ADD COLUMN " + c + " TEXT DEFAULT ''")
+        conn.commit()
+    except Exception as e:
+        log.warning("phrases 컬럼 추가 실패: %s", e)
+
     scols = {r["name"] for r in conn.execute("PRAGMA table_info(sends)").fetchall()}
     if "opened_at" not in scols:
         conn.execute("ALTER TABLE sends ADD COLUMN opened_at TEXT DEFAULT ''")
@@ -809,14 +822,21 @@ def render_phrase(p):
     """회화 한 줄을 텔레그램 메시지로 만든다."""
     parts = []
     parts.append("\U0001F4AC <b>\u0424\u0440\u0430\u0437\u0430 \u0434\u043d\u044f " + str(p.get("day")) + "</b>")
+    if p.get("week_theme"):
+        parts.append("<i>" + html.escape(p["week_theme"]) + "</i>")
     parts.append("")
     if p.get("ko"):
         parts.append("<b>" + html.escape(p["ko"]) + "</b>")
     if p.get("ru"):
         parts.append(html.escape(p["ru"]))
+    if p.get("ex_ko"):
+        parts.append("")
+        parts.append("\U0001F4DD <b>" + html.escape(p["ex_ko"]) + "</b>")
+        if p.get("ex_ru"):
+            parts.append(html.escape(p["ex_ru"]))
     if p.get("note"):
         parts.append("")
-        parts.append(html.escape(p["note"]))
+        parts.append("\U0001F4A1 " + html.escape(p["note"]))
     return "\n".join(parts).strip()
 
 
@@ -1764,8 +1784,12 @@ class Admin(BaseHTTPRequestHandler):
             return self._json(400, {"error": "DAY 번호는 1 이상이어야 합니다"})
         fields = {
             "day": day,
+            "week_theme": b.get("week_theme", ""),
+            "ptype": b.get("ptype", "") or b.get("type", "") or "phrase",
             "ko": b.get("ko", ""),
             "ru": b.get("ru", ""),
+            "ex_ko": b.get("ex_ko", ""),
+            "ex_ru": b.get("ex_ru", ""),
             "note": b.get("note", ""),
             "updated_at": ts(),
         }
@@ -2139,6 +2163,11 @@ pre.prev{white-space:pre-wrap;word-break:break-word;background:var(--paper);bord
 .dr{display:grid;grid-template-columns:78px 1fr 84px 128px 88px 68px auto;gap:16px;align-items:center;padding:15px 22px;border-bottom:1px solid rgba(51,60,77,.07);cursor:pointer;transition:background .12s}
 .dr:last-child{border-bottom:0}.dr:hover{background:rgba(51,60,77,.035)}
 .dr-d{font-family:var(--serif);font-size:16px;font-weight:400}
+.pw{display:grid;grid-template-columns:74px 1fr 1.2fr auto;gap:14px;align-items:center;padding:13px 18px;
+border-bottom:1px solid rgba(51,60,77,.07);cursor:pointer;transition:background .12s}
+.pw:last-child{border-bottom:0}.pw:hover{background:rgba(51,60,77,.035)}
+.pw b{font-family:var(--serif);font-size:15px;font-weight:400}
+@media (max-width:1000px){.pw{grid-template-columns:1fr;gap:6px}}
 @media (max-width:1000px){body::before,body::after{display:none}
 .wrap{padding:24px 18px 90px}
 header{position:static;width:auto;height:auto;flex-direction:row;align-items:center;flex-wrap:wrap;gap:14px;border-right:0;border-bottom:1px solid var(--line);margin-bottom:22px;padding:18px 0}
@@ -2173,10 +2202,7 @@ a.logout{margin-top:0}.grid,.grid.two{grid-template-columns:1fr}
       <button class="b p" onclick="openPhrase(null)">+ 새 문장</button>
       <span class="muted" id="talkMeta"></span>
     </div>
-    <div class="card"><table>
-      <thead><tr><th>DAY</th><th>한국어</th><th>러시아어</th><th>설명</th><th>관리</th></tr></thead>
-      <tbody id="talkRows"></tbody>
-    </table></div>
+    <div id="talkWeeks"></div>
   </section>
 
   <section id="p-users" class="hidden">
@@ -2306,9 +2332,12 @@ a.logout{margin-top:0}.grid,.grid.two{grid-template-columns:1fr}
   <input type="hidden" id="ph-id">
   <div class="grid two">
     <label>DAY 번호<input type="number" id="ph-day" min="1"></label>
+    <label>주제 (주간)<input type="text" id="ph-theme" placeholder="인사"></label>
     <label class="full">한국어 문장<input type="text" id="ph-ko" placeholder="안녕하세요"></label>
     <label class="full">러시아어 뜻<input type="text" id="ph-ru" placeholder="Здравствуйте"></label>
-    <label class="full">언제 쓰는지 (러시아어 설명)<textarea id="ph-note" style="min-height:90px"></textarea></label>
+    <label class="full">예문 (한국어)<input type="text" id="ph-exko" placeholder="선생님, 안녕하세요!"></label>
+    <label class="full">예문 (러시아어)<input type="text" id="ph-exru" placeholder="Учитель, здравствуйте!"></label>
+    <label class="full">설명 (러시아어)<textarea id="ph-note" style="min-height:90px"></textarea></label>
   </div>
   <div class="foot">
     <button class="b p" onclick="savePhrase()">저장</button>
@@ -2412,28 +2441,54 @@ function readToday(v){
   return "<span class=muted>오늘 발송 없음</span>";
 }
 var PHRASES = [];
+var PWOPEN = {};
 function loadPhrases(){
   return fetch("/api/phrases").then(function(r){ return r.json(); }).then(function(d){
-    PHRASES = d.phrases || [];
-    var tb = document.getElementById("talkRows");
-    if (!tb) return;
-    tb.innerHTML = "";
-    PHRASES.forEach(function(P){
-      var tr = document.createElement("tr");
-      tr.innerHTML =
-        "<td><b>DAY " + P.day + "</b></td>" +
-        "<td>" + esc(P.ko || "-") + "</td>" +
-        "<td>" + esc(P.ru || "-") + "</td>" +
-        "<td class=muted>" + esc(P.note || "") + "</td>" +
-        "<td><div class=row>" +
-          "<button class=b data-act=phedit data-id=" + P.id + ">편집</button>" +
-          "<button class='b d' data-act=phdel data-id=" + P.id + ">삭제</button>" +
-        "</div></td>";
-      tb.appendChild(tr);
-    });
-    document.getElementById("talkMeta").textContent =
-      "전체 " + PHRASES.length + "개 · 무료 공개 DAY 1~" + d.free_days;
+    PHRASES = (d.phrases || []).sort(function(p,q){ return (p.day||0)-(q.day||0); });
+    renderPhrases();
+    var el = document.getElementById("talkMeta");
+    if (el) el.textContent = "전체 " + PHRASES.length + "개 · 무료 공개 DAY 1~" + d.free_days;
   });
+}
+function togglePw(w){ PWOPEN[w] = !PWOPEN[w]; renderPhrases(); }
+function renderPhrases(){
+  var host = document.getElementById("talkWeeks");
+  if (!host) return;
+  var groups = {};
+  PHRASES.forEach(function(P){
+    var w = Math.floor(((P.day||1)-1)/7)+1;
+    if(!groups[w]) groups[w] = [];
+    groups[w].push(P);
+  });
+  var ws = Object.keys(groups).map(Number).sort(function(x,y){ return x-y; });
+  var html = "";
+  ws.forEach(function(w){
+    var items = groups[w];
+    var from = (w-1)*7+1;
+    var to = items[items.length-1].day;
+    var open = (PWOPEN[w] === undefined) ? (w === 1) : !!PWOPEN[w];
+    var theme = "";
+    items.forEach(function(P){ if(!theme && P.week_theme) theme = P.week_theme; });
+    html += "<div class=wk>";
+    html += "<button class=wk-h onclick=togglePw(" + w + ")>"
+          + "<span class=wk-ar>" + (open ? "\u25BC" : "\u25B6") + "</span>"
+          + "<b>Week " + w + "</b>"
+          + "<span class=muted> \u00b7 DAY " + from + " ~ DAY " + to + "</span>"
+          + "<span class=wk-n>" + (theme ? esc(theme) : "") + "</span></button>";
+    html += "<div class='wk-b" + (open ? "" : " hidden") + "'>";
+    items.forEach(function(P){
+      html += "<div class=pw data-act=phedit data-id=" + P.id + ">"
+        + "<b>DAY " + P.day + "</b>"
+        + "<div>" + esc(P.ko || "-") + "</div>"
+        + "<div class=muted>" + esc(P.ru || "") + "</div>"
+        + "<div class=row>"
+        + "<button class=b data-act=phedit data-id=" + P.id + ">편집</button>"
+        + "<button class='b d' data-act=phdel data-id=" + P.id + ">삭제</button>"
+        + "</div></div>";
+    });
+    html += "</div></div>";
+  });
+  host.innerHTML = html || "<div class=muted>등록된 회화 문장이 없습니다.</div>";
 }
 function openPhrase(id){
   var P = null;
@@ -2443,8 +2498,11 @@ function openPhrase(id){
   document.getElementById("phTitle").textContent = P ? ("회화 DAY " + P.day) : "새 문장";
   document.getElementById("ph-id").value = P ? P.id : "";
   document.getElementById("ph-day").value = P ? P.day : next;
+  document.getElementById("ph-theme").value = P ? (P.week_theme || "") : "";
   document.getElementById("ph-ko").value = P ? (P.ko || "") : "";
   document.getElementById("ph-ru").value = P ? (P.ru || "") : "";
+  document.getElementById("ph-exko").value = P ? (P.ex_ko || "") : "";
+  document.getElementById("ph-exru").value = P ? (P.ex_ru || "") : "";
   document.getElementById("ph-note").value = P ? (P.note || "") : "";
   document.getElementById("phraseBox").classList.add("on");
 }
@@ -2452,8 +2510,11 @@ function savePhrase(){
   var data = {
     id: document.getElementById("ph-id").value || null,
     day: document.getElementById("ph-day").value,
+    week_theme: document.getElementById("ph-theme").value,
     ko: document.getElementById("ph-ko").value,
     ru: document.getElementById("ph-ru").value,
+    ex_ko: document.getElementById("ph-exko").value,
+    ex_ru: document.getElementById("ph-exru").value,
     note: document.getElementById("ph-note").value
   };
   api("/api/phrase/save", data).then(function(r){
